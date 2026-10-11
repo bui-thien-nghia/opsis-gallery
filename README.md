@@ -8,6 +8,7 @@ All models are in the `bench/assets/` folder, the rest (including SigLIP2 and Mo
 ## 2. Details
 
 ### 2.1. YOLOE-26
+
 YOLOE-26 allows flexible amount of detection classes, but the trade-off in accuracy is risky for fuzzy search.
 Notes from runs:
 
