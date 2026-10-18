@@ -72,4 +72,5 @@ The table below records measurement results:
 Based on the test:
 
 - It is safe to set a fixed thread count of 2 for model inference.
-- Its runtime is eventually suitable if the album size is 10000 (which takes ~30 minutes to fully process)
+- Its runtime is eventually suitable if the album contains ~10000 images (which takes ~30 minutes to fully process)
+- There should be only 1 active module of the model at a time (eg. if image processing for search is forthcoming, unload the textual encoder and load only the visual encoder).
