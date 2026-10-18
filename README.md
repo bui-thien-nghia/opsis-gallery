@@ -24,3 +24,8 @@ simplify=True
 - Runtime is tested on a folder of 1000 images whose size is from 2.7 - 14.8 MB. The average, median, and standard deviation of processing time, from pre- to post-processing, is ~180ms, ~160ms, and ~100ms respectively.
 - Setup on both Python and Rust in 2 different approaches (using the native Ultralytics library and using ONNX Runtime execution engine) differ inconsiderably in runtime (hence the setup in Rust still using `ultralytics-inference` library).
 - The benchmark suggests that the total processing time pre- and post-inference is longer than the inference time itself: inference time revolves around 30ms, while total processing time stretches up to 180ms, as report has shown.
+
+### 2.2. PaddleOCR V4
+
+This may be caused by wrong setup or incompatible ONNX files since PaddleOCR has too many distinct versions for various languages, but detection yields nothing across 1000 images
+The detection time revolves around 63ms. The total processing time should be less than 100ms.

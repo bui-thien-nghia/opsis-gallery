@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut model = YOLOModel::load_with_config("assets/yoloe-26n-seg_int8.onnx", config)?;
 
     // COLLECT IMAGE
-    let image_paths: Vec<String> = fs::read_dir("images")?
+    let image_paths: Vec<String> = fs::read_dir("../images")?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
         .filter(|path| {
@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|path| path.to_string_lossy().into_owned())
         .collect();
 
-    // PRELOAD IMAGES
+    // PRELOAD IMAGES (to be implemented)
 
     // BENCHMARK RUN
     let mut inference_times_ms = Vec::with_capacity(image_paths.len());

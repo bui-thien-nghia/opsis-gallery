@@ -1,6 +1,6 @@
 .venv
 images
-**/target
+target
 *.pt
-onnx/**/*.onnx
+*.onnx
 *.ts

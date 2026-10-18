@@ -1,13 +1,32 @@
 [package]
 name = "rtbench"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
-ultralytics-inference = "0.0.50" 
+# ultralytics-inference = "0.0.50"
 indicatif = "0.17"
 glob = "0.3"
-ort = { version = "2.0.0-rc.9", features = ["ndarray"] }
-ndarray = "0.15"
-image = "0.24"
+ort = { version = "2.0.0-rc.13", features = ["ndarray"] }
+ndarray = "0.17"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 anyhow = "1.0"
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+sysinfo = "0.30"
+clap = { version = "4.4", features = ["derive"] }
+criterion = "0.5"
+
+[[bench]]
+name = "bench"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+debug = false
