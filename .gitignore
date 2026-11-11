@@ -4,3 +4,6 @@ target
 *.pt
 *.onnx
 *.ts
+*.png
+*.jpg
+*.json

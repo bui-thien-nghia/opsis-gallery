@@ -32,12 +32,33 @@ simplify=True
 - Setup on both Python and Rust in 2 different approaches (using the native Ultralytics library and using ONNX Runtime execution engine) differ inconsiderably in runtime (hence the setup in Rust still using `ultralytics-inference` library).
 - The benchmark suggests that the total processing time pre- and post-inference is longer than the inference time itself: inference time revolves around 30ms, while total processing time stretches up to 180ms, as report has shown.
 
-### 3.2. PaddleOCR V4
+### 3.2. YOLOv11 finetuned on Object365 dataset
+
+Although not the newest version, this model is currently the most usable object detection model for this project due to the variety of the finetuning dataset.
+
+More testing on Rust will be noted later
+
+### 3.3. PaddleOCR V4
 
 This may be caused by wrong setup or incompatible ONNX files since PaddleOCR has too many distinct versions for various languages, but detection yields nothing across 1000 images
+
 The detection time revolves around 63ms. The total processing time should be less than 100ms.
 
-### 3.3. SigLIP2
+### 3.4. EasyOCR
+
+Performance-wise, this model is far inferior to PaddleOCR V4, but the setup is much more forgiving and the results are more straigtforward.
+
+- Current setup for this model is:
+
+```python
+batch_size=4
+```
+
+- The model does surprisingly well not only on screenshots but also close-up text-heavy shot, in both English and Vietnamese.
+- Obviously, its obstacles are scenery images (resulting in gibberish characters).
+- The current runtime (**unoptimized**) setup takes `>1s` to process an image, regardless of the text appearance in it.
+
+### 3.5. SigLIP2
 
 SigLIP2, although significantly heavier, is the ultimate fallback when object detection + OCR + fuzzy search does not perform well.
 
