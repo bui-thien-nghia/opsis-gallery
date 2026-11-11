@@ -57,6 +57,7 @@ batch_size=4
 - The model does surprisingly well not only on screenshots but also close-up text-heavy shot, in both English and Vietnamese.
 - Obviously, its obstacles are scenery images (resulting in gibberish characters).
 - The current runtime (**unoptimized**) setup takes `>1s` to process an image, regardless of the text appearance in it.
+- Its ONNX version can be found on [Hugging Face](https://huggingface.co/asmud/EasyOCR-onnx)
 
 ### 3.5. SigLIP2
 
