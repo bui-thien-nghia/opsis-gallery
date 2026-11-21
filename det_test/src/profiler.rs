@@ -62,7 +62,7 @@ pub struct SystemSampler {
 impl SystemSampler {
     pub fn new() -> Self {
         let pid = sysinfo::get_current_pid().ok();
-        let mut sys = System::new();
+        let mut sys = System::new()?;
         if let Some(p) = pid {
             sys.refresh_processes(ProcessesToUpdate::Some(&[p]), true);
         }
