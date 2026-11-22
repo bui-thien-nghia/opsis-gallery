@@ -68,16 +68,19 @@ impl YoloDetector {
         input_size: u32,
         conf_threshold: f32,
     ) -> Result<Self> {
-        let session = Session::builder(env)?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(4)?
+        let session = Session::builder(env)
+            .map_err(|e| anyhow::anyhow!("Failed to create YOLO session builder: {e:?}"))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow::anyhow!("Failed to configure YOLO optimization: {e:?}"))?
+            .with_intra_threads(4)
+            .map_err(|e| anyhow::anyhow!("Failed to configure YOLO threads: {e:?}"))?
             .commit_from_file(model_path)
             .with_context(|| format!("Failed to load YOLO ONNX model: {}", model_path.display()))?;
 
         let mut labels = session
             .metadata()
             .ok()
-            .and_then(|m| m.custom("names").ok().flatten())
+            .and_then(|m| m.custom("names"))
             .map(|raw| parse_metadata_names(&raw))
             .unwrap_or_default();
 

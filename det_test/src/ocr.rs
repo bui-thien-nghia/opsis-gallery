@@ -42,9 +42,12 @@ impl OcrPipeline {
         charset: Vec<char>,
         conf_threshold: f32,
     ) -> Result<Self> {
-        let detector = Session::builder(env)?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(4)?
+        let detector = Session::builder(env)
+            .map_err(|e| anyhow::anyhow!("Failed to create CRAFT session builder: {e:?}"))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow::anyhow!("Failed to configure CRAFT optimization: {e:?}"))?
+            .with_intra_threads(4)
+            .map_err(|e| anyhow::anyhow!("Failed to configure CRAFT threads: {e:?}"))?
             .commit_from_file(detector_path)
             .with_context(|| {
                 format!(
@@ -53,9 +56,12 @@ impl OcrPipeline {
                 )
             })?;
 
-        let recognizer = Session::builder(env)?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(4)?
+        let recognizer = Session::builder(env)
+            .map_err(|e| anyhow::anyhow!("Failed to create CRNN session builder: {e:?}"))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow::anyhow!("Failed to configure CRNN optimization: {e:?}"))?
+            .with_intra_threads(4)
+            .map_err(|e| anyhow::anyhow!("Failed to configure CRNN threads: {e:?}"))?
             .commit_from_file(recognizer_path)
             .with_context(|| {
                 format!(

@@ -12,7 +12,7 @@ use crate::profiler::{StageTimer, SystemSampler, compute_stats, measure_record_s
 use crate::search::FuzzySearcher;
 use crate::storage::{SqliteStore, save_records_json};
 use crate::types::{ImageRecord, StageRuntimes};
-use crate::yolo::YoloDetector;
+use crate::obj_det::YoloDetector;
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
@@ -67,8 +67,8 @@ fn load_charset(path: &Path) -> Result<Vec<char>> {
 
 fn main() -> Result<()> {
     let image_dir = PathBuf::from("D:/test_img");
-    let db_path = PathBuf::from("output/detections.db");
-    let json_path = PathBuf::from("output/detections.json");
+    let db_path = PathBuf::from("data/gallery.db");
+    let json_path = PathBuf::from("data/gallery.json");
     let fallback_labels = Path::new("models/obj_det/labels.txt")
         .exists()
         .then(|| load_lines(Path::new("models/obj_det/labels.txt")))
@@ -78,7 +78,7 @@ fn main() -> Result<()> {
     let env = ort::init().build()?;
     let mut yolo = YoloDetector::new(
         &env,
-        Path::new("models/obj_det/yolo11n_object365.onnx"),
+        Path::new("models/obj_det/yolo11n_object365_int8.onnx"),
         fallback_labels,
         YOLO_INPUT_SIZE,
         YOLO_CONF_THRESHOLD,
@@ -91,12 +91,12 @@ fn main() -> Result<()> {
         OCR_CONF_THRESHOLD,
     )?;
 
-    let mut sampler = SystemSampler::new();
+    let mut sampler = SystemSampler::new()?;
     let image_paths = collect_image_paths(&image_dir)?;
 
     let pb = ProgressBar::new(image_paths.len() as u64);
     pb.set_style(
-        ProgressStyle::with_template("[{elapsed_precise}] {bar:40} {pos}/{len} {msg}")?,
+        ProgressStyle::with_template("[{elapsed_precise}] {bar:40} {pos}/{len} {msg} (ETA: {eta_precise})")?,
     );
 
     let mut records = Vec::with_capacity(image_paths.len());

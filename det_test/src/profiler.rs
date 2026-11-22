@@ -60,13 +60,13 @@ pub struct SystemSampler {
 }
 
 impl SystemSampler {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, sysinfo::Error> {
         let pid = sysinfo::get_current_pid().ok();
         let mut sys = System::new()?;
         if let Some(p) = pid {
             sys.refresh_processes(ProcessesToUpdate::Some(&[p]), true);
         }
-        Self { sys, pid }
+        Ok(Self { sys, pid })
     }
 
     pub fn sample(&mut self) -> (u64, f32) {
@@ -82,7 +82,7 @@ impl SystemSampler {
 }
 
 pub fn measure_record_storage(record: &ImageRecord) -> FieldStorageBytes {
-    let bytes_of = |v: &dyn erased_serde_len| v.json_len();
+    let bytes_of = |v: &dyn ErasedSerdeLen| v.json_len();
     let file_name = bytes_of(&record.file_name);
     let file_path = bytes_of(&record.file_path);
     let object_classes = bytes_of(&record.object_classes);
@@ -113,11 +113,11 @@ pub fn measure_record_storage(record: &ImageRecord) -> FieldStorageBytes {
     }
 }
 
-trait erased_serde_len {
+trait ErasedSerdeLen {
     fn json_len(&self) -> usize;
 }
 
-impl<T: Serialize> erased_serde_len for T {
+impl<T: Serialize> ErasedSerdeLen for T {
     fn json_len(&self) -> usize {
         serde_json::to_vec(self).map(|b| b.len()).unwrap_or(0)
     }
