@@ -4,10 +4,47 @@ use anyhow::{Context, Result};
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
 use ndarray::Array4;
 use ort::{
+    environment::Environment,
     session::{Session, builder::GraphOptimizationLevel},
     value::Tensor,
 };
 use std::path::Path;
+use serde_json::Value;
+use std::collections::BTreeMap;
+
+fn parse_metadata_names(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let normalized = trimmed.replace('\'', "\"");
+    let Ok(val) = serde_json::from_str::<Value>(&normalized) else {
+        return Vec::new();
+    };
+
+    match val {
+        Value::Object(obj) => {
+            let mut map = BTreeMap::new();
+            for (k, v) in obj {
+                if let (Ok(idx), Some(name)) = (k.trim().parse::<usize>(), v.as_str()) {
+                    map.insert(idx, name.to_string());
+                }
+            }
+            let Some(&max_idx) = map.keys().max() else {
+                return Vec::new();
+            };
+            (0..=max_idx)
+                .map(|i| map.remove(&i).unwrap_or_else(|| i.to_string()))
+                .collect()
+        }
+        Value::Array(arr) => arr
+            .into_iter()
+            .filter_map(|v| v.as_str().map(ToOwned::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
 
 pub struct YoloPreparedInput {
     pub tensor: Array4<f32>,
@@ -25,16 +62,29 @@ pub struct YoloDetector {
 
 impl YoloDetector {
     pub fn new(
+        env: &Environment,
         model_path: &Path,
-        labels: Vec<String>,
+        fallback_labels: Option<Vec<String>>,
         input_size: u32,
         conf_threshold: f32,
     ) -> Result<Self> {
-        let session = Session::builder()?
+        let session = Session::builder(env)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(4)?
             .commit_from_file(model_path)
             .with_context(|| format!("Failed to load YOLO ONNX model: {}", model_path.display()))?;
+
+        let mut labels = session
+            .metadata()
+            .ok()
+            .and_then(|m| m.custom("names").ok().flatten())
+            .map(|raw| parse_metadata_names(&raw))
+            .unwrap_or_default();
+
+        if labels.is_empty() {
+            print!("Class mapping not found in ONNX model, using fallback labels");
+            labels = fallback_labels.unwrap_or_default();
+        }
 
         Ok(Self {
             session,

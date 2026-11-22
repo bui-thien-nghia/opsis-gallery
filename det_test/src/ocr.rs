@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
 use ndarray::Array4;
 use ort::{
+    environment::Environment,
     session::{Session, builder::GraphOptimizationLevel},
     value::Tensor,
 };
@@ -35,12 +36,13 @@ pub struct OcrPipeline {
 
 impl OcrPipeline {
     pub fn new(
+        env: &Environment,
         detector_path: &Path,
         recognizer_path: &Path,
         charset: Vec<char>,
         conf_threshold: f32,
     ) -> Result<Self> {
-        let detector = Session::builder()?
+        let detector = Session::builder(env)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(4)?
             .commit_from_file(detector_path)
@@ -51,7 +53,7 @@ impl OcrPipeline {
                 )
             })?;
 
-        let recognizer = Session::builder()?
+        let recognizer = Session::builder(env)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .with_intra_threads(4)?
             .commit_from_file(recognizer_path)

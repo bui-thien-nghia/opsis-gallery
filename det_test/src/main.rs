@@ -69,19 +69,24 @@ fn main() -> Result<()> {
     let image_dir = PathBuf::from("D:/test_img");
     let db_path = PathBuf::from("output/detections.db");
     let json_path = PathBuf::from("output/detections.json");
-
-    let labels = load_lines(Path::new("models/obj_det/labels.txt"))?;
+    let fallback_labels = Path::new("models/obj_det/labels.txt")
+        .exists()
+        .then(|| load_lines(Path::new("models/obj_det/labels.txt")))
+        .transpose()?;
     let charset = load_charset(Path::new("models/ocr/vietnamese_charset.txt"))?;
 
+    let env = ort::init().build()?;
     let mut yolo = YoloDetector::new(
+        &env,
         Path::new("models/obj_det/yolo11n_object365.onnx"),
-        labels,
+        fallback_labels,
         YOLO_INPUT_SIZE,
         YOLO_CONF_THRESHOLD,
     )?;
     let mut ocr = OcrPipeline::new(
+        &env,
         Path::new("models/ocr/craft_mlt_25k_jpqd.onnx"),
-        Path::new("models/ocr/english_g2_jpqd.onnx"),
+        Path::new("models/ocr/latin_g2_jpqd.onnx"),
         charset,
         OCR_CONF_THRESHOLD,
     )?;
