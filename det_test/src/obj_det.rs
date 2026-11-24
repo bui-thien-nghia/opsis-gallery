@@ -18,32 +18,48 @@ fn parse_metadata_names(raw: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    let normalized = trimmed.replace('\'', "\"");
-    let Ok(val) = serde_json::from_str::<Value>(&normalized) else {
-        return Vec::new();
-    };
+    let normalized = trimmed
+        .replace('{', "")
+        .replace('}', "")
+        .replace('\'', "\"");
+    let mut map = BTreeMap::new();
 
-    match val {
-        Value::Object(obj) => {
-            let mut map = BTreeMap::new();
-            for (k, v) in obj {
-                if let (Ok(idx), Some(name)) = (k.trim().parse::<usize>(), v.as_str()) {
-                    map.insert(idx, name.to_string());
+    for part in normalized.split(',') {
+        let mut pair = part.splitn(2, ':');
+        let (Some(key), Some(value)) = (pair.next(), pair.next()) else {
+            continue;
+        };
+        let Ok(index) = key.trim().trim_matches('"').parse::<usize>() else {
+            continue;
+        };
+        let name = value.trim().trim_matches('"').trim();
+        if !name.is_empty() {
+            map.insert(index, name.to_string());
+        }
+    }
+
+    if map.is_empty() {
+        if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(trimmed) {
+            return arr
+                .into_iter()
+                .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+                .collect();
+        }
+        if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
+            for (key, value) in obj {
+                if let (Ok(index), Some(name)) = (key.parse::<usize>(), value.as_str()) {
+                    map.insert(index, name.to_string());
                 }
             }
-            let Some(&max_idx) = map.keys().max() else {
-                return Vec::new();
-            };
-            (0..=max_idx)
-                .map(|i| map.remove(&i).unwrap_or_else(|| i.to_string()))
-                .collect()
         }
-        Value::Array(arr) => arr
-            .into_iter()
-            .filter_map(|v| v.as_str().map(ToOwned::to_owned))
-            .collect(),
-        _ => Vec::new(),
     }
+
+    let Some(&max_index) = map.keys().max() else {
+        return Vec::new();
+    };
+    (0..=max_index)
+        .map(|index| map.remove(&index).unwrap_or_else(|| index.to_string()))
+        .collect()
 }
 
 pub struct YoloPreparedInput {
@@ -64,7 +80,6 @@ impl YoloDetector {
     pub fn new(
         env: &Environment,
         model_path: &Path,
-        fallback_labels: Option<Vec<String>>,
         input_size: u32,
         conf_threshold: f32,
     ) -> Result<Self> {
@@ -83,11 +98,6 @@ impl YoloDetector {
             .and_then(|m| m.custom("names"))
             .map(|raw| parse_metadata_names(&raw))
             .unwrap_or_default();
-
-        if labels.is_empty() {
-            print!("Class mapping not found in ONNX model, using fallback labels");
-            labels = fallback_labels.unwrap_or_default();
-        }
 
         Ok(Self {
             session,
@@ -121,55 +131,110 @@ impl YoloDetector {
     pub fn detect(&mut self, prepared: YoloPreparedInput) -> Result<Vec<YoloDetection>> {
         let input_tensor = Tensor::from_array(prepared.tensor)?;
         let outputs = self.session.run(ort::inputs!["images" => input_tensor])?;
-        let (_shape, raw) = outputs[0].try_extract_tensor::<f32>()?;
+        let (shape, raw) = outputs[0].try_extract_tensor::<f32>()?;
 
         let num_classes = self.labels.len();
-        let num_preds = if num_classes + 4 > 0 {
-            raw.len() / (num_classes + 4)
-        } else {
-            0
-        };
-
+        let mut candidates = Vec::new();
         let sx = prepared.orig_w as f32 / self.input_size as f32;
         let sy = prepared.orig_h as f32 / self.input_size as f32;
-        let mut detections = Vec::new();
 
-        for i in 0..num_preds {
-            let cx = raw[i];
-            let cy = raw[num_preds + i];
-            let w = raw[2 * num_preds + i];
-            let h = raw[3 * num_preds + i];
+        let (num_predictions, prediction_major) = match shape.as_ref() {
+            [_, channels, predictions] if *channels as usize == num_classes + 4 => {
+                (*predictions as usize, false)
+            }
+            [_, predictions, channels] if *channels as usize == num_classes + 4 => {
+                (*predictions as usize, true)
+            }
+            _ => return Ok(Vec::new()),
+        };
 
-            let mut best_cls = 0;
+        for prediction in 0..num_predictions {
+            let base = if prediction_major { prediction * (num_classes + 4) } else { prediction };
+            let stride = if prediction_major { 1 } else { num_predictions };
+
+            let cx = raw[base];
+            let cy = raw[base + stride];
+            let width = raw[base + 2 * stride];
+            let height = raw[base + 3 * stride];
+
+            let mut best_class = 0;
             let mut best_score = 0.0_f32;
-            for c in 0..num_classes {
-                let score = raw[(4 + c) * num_preds + i];
+            for class in 0..num_classes {
+                let score = raw[base + (4 + class) * stride];
                 if score > best_score {
                     best_score = score;
-                    best_cls = c;
+                    best_class = class;
                 }
             }
 
-            if best_score >= self.conf_threshold {
-                let x1 = ((cx - w * 0.5) * sx).max(0.0);
-                let y1 = ((cy - h * 0.5) * sy).max(0.0);
-                let x2 = ((cx + w * 0.5) * sx).min(prepared.orig_w as f32);
-                let y2 = ((cy + h * 0.5) * sy).min(prepared.orig_h as f32);
+            if best_score < self.conf_threshold {
+                continue;
+            }
 
-                let label = self
-                    .labels
-                    .get(best_cls)
-                    .cloned()
-                    .unwrap_or_else(|| best_cls.to_string());
+            let x1 = ((cx - width * 0.5) * sx).max(0.0);
+            let y1 = ((cy - height * 0.5) * sy).max(0.0);
+            let x2 = ((cx + width * 0.5) * sx).min(prepared.orig_w as f32);
+            let y2 = ((cy + height * 0.5) * sy).min(prepared.orig_h as f32);
 
-                detections.push(YoloDetection {
-                    class: label,
+            if x2 > x1 && y2 > y1 {
+                candidates.push(YoloCandidate {
+                    class_index: best_class,
                     confidence: best_score,
-                    bbox: rescale_xyxy([x1, y1, x2, y2], prepared.resize_scale),
+                    bbox: [x1, y1, x2, y2],
                 });
             }
         }
 
-        Ok(detections)
+        Ok(apply_nms(candidates, self.labels.as_slice(), prepared.resize_scale))
     }
+}
+
+#[derive(Clone)]
+struct YoloCandidate {
+    class_index: usize,
+    confidence: f32,
+    bbox: [f32; 4],
+}
+
+fn apply_nms(
+    mut candidates: Vec<YoloCandidate>,
+    labels: &[String],
+    resize_scale: f32,
+) -> Vec<YoloDetection> {
+    const IOU_THRESHOLD: f32 = 0.45;
+
+    candidates.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+    let mut kept = Vec::new();
+
+    while let Some(candidate) = candidates.first().cloned() {
+        candidates.remove(0);
+        candidates.retain(|other| {
+            other.class_index != candidate.class_index
+                || intersection_over_union(candidate.bbox, other.bbox) < IOU_THRESHOLD
+        });
+
+        let label = labels
+            .get(candidate.class_index)
+            .cloned()
+            .unwrap_or_else(|| candidate.class_index.to_string());
+        kept.push(YoloDetection {
+            class: label,
+            confidence: candidate.confidence,
+            bbox: rescale_xyxy(candidate.bbox, resize_scale),
+        });
+    }
+
+    kept
+}
+
+fn intersection_over_union(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let x1 = a[0].max(b[0]);
+    let y1 = a[1].max(b[1]);
+    let x2 = a[2].min(b[2]);
+    let y2 = a[3].min(b[3]);
+    let intersection = (x2 - x1).max(0.0) * (y2 - y1).max(0.0);
+    let area_a = (a[2] - a[0]).max(0.0) * (a[3] - a[1]).max(0.0);
+    let area_b = (b[2] - b[0]).max(0.0) * (b[3] - b[1]).max(0.0);
+    let union = area_a + area_b - intersection;
+    if union <= 0.0 { 0.0 } else { intersection / union }
 }

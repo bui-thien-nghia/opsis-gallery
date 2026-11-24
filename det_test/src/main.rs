@@ -1,27 +1,29 @@
+mod obj_det;
 mod ocr;
 mod preprocess;
 mod profiler;
 mod search;
 mod storage;
 mod types;
-mod obj_det;
 
+use crate::obj_det::YoloDetector;
 use crate::ocr::OcrPipeline;
 use crate::preprocess::{adaptive_resize, load_image};
 use crate::profiler::{StageTimer, SystemSampler, compute_stats, measure_record_storage};
 use crate::search::FuzzySearcher;
 use crate::storage::{SqliteStore, save_records_json};
 use crate::types::{ImageRecord, StageRuntimes};
-use crate::obj_det::YoloDetector;
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
+use oar_ocr_core::core::inference::initialize_ort_environment;
 use std::collections::HashMap;
 use std::fs;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 const MAX_DIM: u32 = 1600;
 const YOLO_INPUT_SIZE: u32 = 320;
-const YOLO_CONF_THRESHOLD: f32 = 0.2;
+const YOLO_CONF_THRESHOLD: f32 = 0.5;
 const OCR_CONF_THRESHOLD: f32 = 0.5;
 
 fn collect_image_paths(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -48,6 +50,7 @@ fn collect_image_paths(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+#[allow(dead_code)]
 fn load_lines(path: &Path) -> Result<Vec<String>> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("Failed to read label file: {}", path.display()))?;
@@ -59,6 +62,7 @@ fn load_lines(path: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+#[allow(dead_code)]
 fn load_charset(path: &Path) -> Result<Vec<char>> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("Failed to read charset file: {}", path.display()))?;
@@ -66,28 +70,24 @@ fn load_charset(path: &Path) -> Result<Vec<char>> {
 }
 
 fn main() -> Result<()> {
-    let image_dir = PathBuf::from("D:/test_img");
+    let image_dir = PathBuf::from("D:/test_ocr");
     let db_path = PathBuf::from("data/gallery.db");
     let json_path = PathBuf::from("data/gallery.json");
-    let fallback_labels = Path::new("models/obj_det/labels.txt")
-        .exists()
-        .then(|| load_lines(Path::new("models/obj_det/labels.txt")))
-        .transpose()?;
-    let charset = load_charset(Path::new("models/ocr/vietnamese_charset.txt"))?;
 
-    let env = ort::init().build()?;
+    let env = initialize_ort_environment()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize ONNX Runtime environment: {e:?}"))?;
+
     let mut yolo = YoloDetector::new(
         &env,
         Path::new("models/obj_det/yolo11n_object365_int8.onnx"),
-        fallback_labels,
         YOLO_INPUT_SIZE,
         YOLO_CONF_THRESHOLD,
     )?;
-    let mut ocr = OcrPipeline::new(
+    let ocr = OcrPipeline::new(
         &env,
-        Path::new("models/ocr/craft_mlt_25k_jpqd.onnx"),
-        Path::new("models/ocr/latin_g2_jpqd.onnx"),
-        charset,
+        Path::new("models/ocr/ppocrv6-det-s.onnx"),
+        Path::new("models/ocr/ppocrv6-rec-s.onnx"),
+        Path::new("models/ocr/ppocrv6-keys.txt"),
         OCR_CONF_THRESHOLD,
     )?;
 
@@ -95,9 +95,9 @@ fn main() -> Result<()> {
     let image_paths = collect_image_paths(&image_dir)?;
 
     let pb = ProgressBar::new(image_paths.len() as u64);
-    pb.set_style(
-        ProgressStyle::with_template("[{elapsed_precise}] {bar:40} {pos}/{len} {msg} (ETA: {eta_precise})")?,
-    );
+    pb.set_style(ProgressStyle::with_template(
+        "[{elapsed_precise}] {bar:40} {pos}/{len} {msg} (ETA: {eta_precise})",
+    )?);
 
     let mut records = Vec::with_capacity(image_paths.len());
     let mut proc_times = Vec::with_capacity(image_paths.len());
@@ -106,38 +106,63 @@ fn main() -> Result<()> {
     let mut storage_totals = Vec::with_capacity(image_paths.len());
 
     for path in &image_paths {
-        // Global timer
         let total_timer = StageTimer::start();
+        let file_name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let file_path = path.to_string_lossy().into_owned();
 
-        // Detection preprocessing
-        let prep_timer = StageTimer::start();
-        let img = load_image(path)?;
-        let (resized, scale) = adaptive_resize(img, MAX_DIM);
-        let yolo_prep = yolo.prepare(&resized, scale);
-        let ocr_det_prep = ocr.prepare_detection(&resized, scale);
-        let mut prep_s = prep_timer.elapsed_secs();
+        let mut prep_s = 0.0;
+        let mut yolo_detections = Vec::new();
+        let mut ocr_detections = Vec::new();
+        let mut yolo_s = 0.0;
+        let mut ocr_s = 0.0;
 
-        // YOLO inference
-        let yolo_timer = StageTimer::start();
-        let yolo_detections = yolo.detect(yolo_prep)?;
-        let yolo_s = yolo_timer.elapsed_secs();
+        match catch_unwind(AssertUnwindSafe(|| load_image(path))) {
+            Ok(Ok(img)) => {
+                let prep_timer = StageTimer::start();
+                let (resized, scale) = adaptive_resize(img, MAX_DIM);
+                let yolo_prep = yolo.prepare(&resized, scale);
+                prep_s = prep_timer.elapsed_secs();
 
-        // OCR det inference
-        let ocr_det_timer = StageTimer::start();
-        let (text_boxes, box_scale) = ocr.detect_boxes(ocr_det_prep)?;
-        let ocr_det_s = ocr_det_timer.elapsed_secs();
+                let yolo_timer = StageTimer::start();
+                match yolo.detect(yolo_prep) {
+                    Ok(detections) => yolo_detections = detections,
+                    Err(error) => {
+                        eprintln!("YOLO failed for '{}': {error:#}", path.display());
+                    }
+                }
+                yolo_s = yolo_timer.elapsed_secs();
 
-        // Recognition preprocessing
-        let ocr_prep_timer = StageTimer::start();
-        let ocr_rec_prep = ocr.prepare_recognitions(&resized, &text_boxes, box_scale);
-        prep_s += ocr_prep_timer.elapsed_secs();
+                let ocr_timer = StageTimer::start();
+                match ocr.recognize(&resized, scale) {
+                    Ok(detections) => ocr_detections = detections,
+                    Err(error) => {
+                        eprintln!("OCR failed for '{}': {error:#}", path.display());
+                    }
+                }
+                ocr_s = ocr_timer.elapsed_secs();
+            }
+            Ok(Err(error)) => {
+                eprintln!("Unable to process '{}': {error:#}", path.display());
+            }
+            Err(panic) => {
+                let panic_message = panic
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .map(str::to_string)
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic".to_string());
+                eprintln!(
+                    "Unable to process '{}': panic while loading image: {}",
+                    path.display(),
+                    panic_message
+                );
+            }
+        }
 
-        // OCR rec inference
-        let ocr_rec_timer = StageTimer::start();
-        let ocr_detections = ocr.recognize_boxes(ocr_rec_prep)?;
-        let ocr_rec_s = ocr_rec_timer.elapsed_secs();
-
-        // Postprocessing
         let post_timer = StageTimer::start();
         let object_classes = yolo_detections
             .iter()
@@ -149,27 +174,24 @@ fn main() -> Result<()> {
             .map(|d| d.text.as_str())
             .collect::<Vec<_>>()
             .join(" ");
-        let combined_text = format!("{object_classes} {text_detections}").trim().to_string();
 
-        let file_name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let file_path = path.to_string_lossy().into_owned();
+        let combined_text = if object_classes.is_empty() {
+            text_detections.clone()
+        } else if text_detections.is_empty() {
+            object_classes.clone()
+        } else {
+            format!("{object_classes} {text_detections}")
+        };
+        let post_s = post_timer.elapsed_secs();
 
-        let mut runtime = StageRuntimes {
+        let runtime = StageRuntimes {
             preprocessing: prep_s,
             yolo_inference: yolo_s,
-            ocr_inference: ocr_det_s + ocr_rec_s,
-            postprocessing: 0.0,
-            total: 0.0,
+            ocr_inference: ocr_s,
+            postprocessing: post_s,
+            total: total_timer.elapsed_secs(),
         };
-        runtime.postprocessing = post_timer.elapsed_secs();
 
-        runtime.total = total_timer.elapsed_secs();
-
-        // Profiling
         let record = ImageRecord {
             file_name: file_name.clone(),
             file_path,
@@ -205,7 +227,7 @@ fn main() -> Result<()> {
 
     let loaded_records = store.load_all_records()?;
     let mut searcher = FuzzySearcher::new();
-    let query = "invoice receipt table";
+    let query = "person on a boat";
 
     let query_timer = StageTimer::start();
     let hits = searcher.search(&loaded_records, query, 10);
