@@ -34,3 +34,38 @@ pub fn rescale_quad(bbox: [[f32; 2]; 4], scale: f32) -> [[i32; 2]; 4] {
     let inv = 1.0 / scale;
     bbox.map(|[x, y]| [(x * inv).round() as i32, (y * inv).round() as i32])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adaptive_resize_leaves_small_image_unchanged() {
+        let img = DynamicImage::new_rgb8(320, 240);
+        let (resized, scale) = adaptive_resize(img, 1600);
+        assert_eq!(resized.dimensions(), (320, 240));
+        assert_eq!(scale, 1.0);
+    }
+
+    #[test]
+    fn adaptive_resize_scales_down_large_image() {
+        let img = DynamicImage::new_rgb8(3200, 1600);
+        let (resized, scale) = adaptive_resize(img, 1600);
+        assert_eq!(resized.dimensions(), (1600, 800));
+        assert!((scale - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rescale_helpers_invert_resize_scale() {
+        assert_eq!(rescale_xyxy([10.0, 20.0, 30.0, 40.0], 0.5), [20.0, 40.0, 60.0, 80.0]);
+        assert_eq!(
+            rescale_quad([[5.0, 10.0], [15.0, 10.0], [15.0, 20.0], [5.0, 20.0]], 0.5),
+            [[10, 20], [30, 20], [30, 40], [10, 40]]
+        );
+    }
+
+    #[test]
+    fn load_image_errors_on_missing_file() {
+        assert!(load_image(Path::new("nonexistent_test_image_12345.png")).is_err());
+    }
+}

@@ -60,12 +60,13 @@ fn main() -> Result<()> {
     let json_path = PathBuf::from("data/gallery.json");
 
     let mut yolo = YoloDetector::new(
-        Path::new("models/obj_det/yolo11n-320-fp16.onnx"),
+        &env,
+        Path::new("models/obj_det/yolo11n-320-int8.onnx"),
         YOLO_CONF_THRESHOLD,
     )?;
     let ocr = OcrPipeline::new(
-        Path::new("models/ocr/ppocrv6-det-s.onnx"),
-        Path::new("models/ocr/ppocrv6-rec-s.onnx"),
+        Path::new("models/ocr/ppocrv5-det-mobile.onnx"),
+        Path::new("models/ocr/ppocrv5-rec-mobile.onnx"),
         Path::new("models/ocr/ppocrv6-keys.txt"),
         OCR_CONF_THRESHOLD,
     )?;
@@ -246,4 +247,39 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::DynamicImage;
+
+    #[test]
+    fn unified_ort_pipeline_runs_yolo_and_ocr_on_image() {
+        let env = ort::init().with_telemetry(false).build().unwrap();
+        set_ort_environment(env.clone()).unwrap();
+
+        let mut yolo = YoloDetector::new(
+            &env,
+            Path::new("models/obj_det/yolo11n-320-int8.onnx"),
+            YOLO_CONF_THRESHOLD,
+        )
+        .unwrap();
+        let ocr = OcrPipeline::new(
+            Path::new("models/ocr/ppocrv5-det-mobile.onnx"),
+            Path::new("models/ocr/ppocrv5-rec-mobile.onnx"),
+            Path::new("models/ocr/ppocrv6-keys.txt"),
+            OCR_CONF_THRESHOLD,
+        )
+        .unwrap();
+
+        let img = DynamicImage::new_rgb8(640, 480);
+        let (resized, scale) = adaptive_resize(img, MAX_DIM);
+        let prepared = yolo.prepare(&resized, scale);
+
+        let yolo_out = yolo.detect(prepared).unwrap();
+        let ocr_out = ocr.recognize(&resized, scale).unwrap();
+        assert!(yolo_out.is_empty());
+        assert!(ocr_out.is_empty());
+    }
 }
