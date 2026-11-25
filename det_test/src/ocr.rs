@@ -3,7 +3,6 @@ use crate::types::OcrDetection;
 use anyhow::{Context, Result};
 use image::DynamicImage;
 use oar_ocr::prelude::*;
-use ort::environment::Environment;
 use std::path::Path;
 
 pub struct OcrPipeline {
@@ -13,7 +12,6 @@ pub struct OcrPipeline {
 
 impl OcrPipeline {
     pub fn new(
-        env: &Environment,
         detector_path: &Path,
         recognizer_path: &Path,
         dict_path: &Path,

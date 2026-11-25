@@ -15,15 +15,14 @@ use crate::storage::{SqliteStore, save_records_json};
 use crate::types::{ImageRecord, StageRuntimes};
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use oar_ocr_core::core::inference::initialize_ort_environment;
+use oar_ocr_core::core::inference::set_ort_environment;
 use std::collections::HashMap;
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 const MAX_DIM: u32 = 1600;
-const YOLO_INPUT_SIZE: u32 = 320;
-const YOLO_CONF_THRESHOLD: f32 = 0.5;
+const YOLO_CONF_THRESHOLD: f32 = 0.2;
 const OCR_CONF_THRESHOLD: f32 = 0.5;
 
 fn collect_image_paths(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -70,21 +69,24 @@ fn load_charset(path: &Path) -> Result<Vec<char>> {
 }
 
 fn main() -> Result<()> {
-    let image_dir = PathBuf::from("D:/test_ocr");
+    let env = ort::init()
+        .with_telemetry(false)
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize ONNX Runtime environment: {e:?}"))?;
+
+    let image_dir = PathBuf::from("D:/test_det");
     let db_path = PathBuf::from("data/gallery.db");
     let json_path = PathBuf::from("data/gallery.json");
 
-    let env = initialize_ort_environment()
-        .map_err(|e| anyhow::anyhow!("Failed to initialize ONNX Runtime environment: {e:?}"))?;
+    set_ort_environment(env.clone())
+        .map_err(|e| anyhow::anyhow!("Failed to share ONNX Runtime environment with OAR: {e:?}"))?;
 
     let mut yolo = YoloDetector::new(
         &env,
-        Path::new("models/obj_det/yolo11n_object365_int8.onnx"),
-        YOLO_INPUT_SIZE,
+        Path::new("models/obj_det/yolo11n-640-fp16.onnx"),
         YOLO_CONF_THRESHOLD,
     )?;
     let ocr = OcrPipeline::new(
-        &env,
         Path::new("models/ocr/ppocrv6-det-s.onnx"),
         Path::new("models/ocr/ppocrv6-rec-s.onnx"),
         Path::new("models/ocr/ppocrv6-keys.txt"),
