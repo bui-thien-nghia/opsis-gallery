@@ -8,7 +8,7 @@ edition = "2024"
 ort = "2.0.0-rc.15"
 oar-ocr = "0.11.0"
 oar-ocr-core = "0.11.0"
-yolo-rs = "0.3.0"
+ultralytics-inference = "0.0.61"
 ndarray = "0.17"
 image = "0.25"
 

@@ -73,7 +73,8 @@ impl SystemSampler {
         let Some(pid) = self.pid else {
             return (0, 0.0);
         };
-        self.sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+        self.sys
+            .refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
         match self.sys.process(pid) {
             Some(proc_) => (proc_.memory(), proc_.cpu_usage()),
             None => (0, 0.0),
@@ -164,7 +165,10 @@ pub fn compute_stats(values: &[f64]) -> SummaryStats {
 pub fn summarize_profiles(profiles: &[ImageProfile]) -> HashMap<String, SummaryStats> {
     let mut metrics: HashMap<&str, Vec<f64>> = HashMap::new();
     for p in profiles {
-        metrics.entry("runtime_total_s").or_default().push(p.runtime_total_s);
+        metrics
+            .entry("runtime_total_s")
+            .or_default()
+            .push(p.runtime_total_s);
         metrics
             .entry("runtime_preprocessing_s")
             .or_default()

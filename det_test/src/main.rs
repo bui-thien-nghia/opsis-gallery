@@ -1,4 +1,4 @@
-mod obj_det;
+mod obj_ultralytics;
 mod ocr;
 mod preprocess;
 mod profiler;
@@ -6,7 +6,7 @@ mod search;
 mod storage;
 mod types;
 
-use crate::obj_det::YoloDetector;
+use crate::obj_ultralytics::YoloDetector;
 use crate::ocr::OcrPipeline;
 use crate::preprocess::{adaptive_resize, load_image};
 use crate::profiler::{StageTimer, SystemSampler, compute_stats, measure_record_storage};
@@ -15,7 +15,7 @@ use crate::storage::{SqliteStore, save_records_json};
 use crate::types::{ImageRecord, StageRuntimes};
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use oar_ocr_core::core::inference::set_ort_environment;
+use oar_ocr::core::OrtGlobalThreadPoolOptions;
 use std::collections::HashMap;
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -49,41 +49,18 @@ fn collect_image_paths(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-#[allow(dead_code)]
-fn load_lines(path: &Path) -> Result<Vec<String>> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read label file: {}", path.display()))?;
-    Ok(raw
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(ToOwned::to_owned)
-        .collect())
-}
-
-#[allow(dead_code)]
-fn load_charset(path: &Path) -> Result<Vec<char>> {
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read charset file: {}", path.display()))?;
-    Ok(raw.chars().filter(|c| *c != '\r' && *c != '\n').collect())
-}
-
 fn main() -> Result<()> {
-    let env = ort::init()
-        .with_telemetry(false)
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to initialize ONNX Runtime environment: {e:?}"))?;
+    OrtGlobalThreadPoolOptions::new()
+        .with_intra_threads(4)
+        .commit()
+        .map_err(|e| anyhow::anyhow!("Failed to commit ONNX Runtime global thread pool: {e:?}"))?;
 
     let image_dir = PathBuf::from("D:/test_det");
     let db_path = PathBuf::from("data/gallery.db");
     let json_path = PathBuf::from("data/gallery.json");
 
-    set_ort_environment(env.clone())
-        .map_err(|e| anyhow::anyhow!("Failed to share ONNX Runtime environment with OAR: {e:?}"))?;
-
     let mut yolo = YoloDetector::new(
-        &env,
-        Path::new("models/obj_det/yolo11n-640-fp16.onnx"),
+        Path::new("models/obj_det/yolo11n-320-fp16.onnx"),
         YOLO_CONF_THRESHOLD,
     )?;
     let ocr = OcrPipeline::new(
