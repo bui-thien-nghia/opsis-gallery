@@ -146,18 +146,27 @@ impl YoloDetector {
     }
 
     pub fn detect(&mut self, prepared: YoloPreparedInput<'_>) -> Result<Vec<YoloDetection>> {
-        let size = self.input_size as u32;
-        let image = prepared
-            .img
-            .resize_exact(size, size, FilterType::CatmullRom)
-            .to_rgb8();
-        let mut tensor = Array3::<f32>::zeros((3, size as usize, size as usize));
-        for y in 0..size as usize {
-            for x in 0..size as usize {
-                let pixel = image.get_pixel(x as u32, y as u32);
-                tensor[[0, y, x]] = pixel[0] as f32 / 255.0;
-                tensor[[1, y, x]] = pixel[1] as f32 / 255.0;
-                tensor[[2, y, x]] = pixel[2] as f32 / 255.0;
+        let size = self.input_size;
+        let raw_width = prepared.img.width();
+        let raw_height = prepared.img.height();
+        let letterbox = Letterbox::compute(raw_width, raw_height, size);
+
+        let resized = prepared.img.resize_exact(
+            letterbox.new_w,
+            letterbox.new_h,
+            FilterType::Triangle,
+        ).to_rgb8();
+
+        let pad_norm = 114.0 / 255.0;
+        let mut tensor = Array3::<f32>::from_elem((3, size as usize, size as usize), pad_norm);
+        let pad_x = letterbox.pad_left as usize;
+        let pad_y = letterbox.pad_top as usize;
+        for y in 0..letterbox.new_h as usize {
+            for x in 0..letterbox.new_w as usize {
+                let pixel = resized.get_pixel(x as u32, y as u32);
+                tensor[[0, pad_y + y, pad_x + x]] = pixel[0] as f32 / 255.0;
+                tensor[[1, pad_y + y, pad_x + x]] = pixel[1] as f32 / 255.0;
+                tensor[[2, pad_y + y, pad_x + x]] = pixel[2] as f32 / 255.0;
             }
         }
 
@@ -175,25 +184,16 @@ impl YoloDetector {
             .into_owned();
 
         let class_count = self.labels.len();
-        let (detections, raw_width, raw_height) = (
-            decode_yolo_output(&output, class_count, self.conf_threshold),
-            prepared.img.width() as f32,
-            prepared.img.height() as f32,
-        );
+        let detections = decode_yolo_output(&output, class_count, self.conf_threshold);
 
         let mut boxes = Vec::with_capacity(detections.len());
         for (class_id, confidence, xc, yc, w, h) in detections {
-            let width_scale = raw_width / self.input_size as f32;
-            let height_scale = raw_height / self.input_size as f32;
-            let bbox = rescale_xyxy(
-                [
-                    (xc - w / 2.0) * width_scale,
-                    (yc - h / 2.0) * height_scale,
-                    (xc + w / 2.0) * width_scale,
-                    (yc + h / 2.0) * height_scale,
-                ],
-                prepared.resize_scale,
+            let unscaled = letterbox.unscale_xyxy(
+                [xc - w / 2.0, yc - h / 2.0, xc + w / 2.0, yc + h / 2.0],
+                raw_width as f32,
+                raw_height as f32,
             );
+            let bbox = rescale_xyxy(unscaled, prepared.resize_scale);
             boxes.push(YoloDetection {
                 class: self.labels[class_id].clone(),
                 confidence,
@@ -202,6 +202,46 @@ impl YoloDetector {
         }
 
         Ok(non_maximum_suppression(boxes, self.iou_threshold))
+    }
+}
+
+struct Letterbox {
+    scale: f32,
+    new_w: u32,
+    new_h: u32,
+    pad_left: u32,
+    pad_top: u32,
+}
+
+impl Letterbox {
+    fn compute(orig_w: u32, orig_h: u32, target: u32) -> Self {
+        let scale = (target as f32 / orig_w.max(1) as f32)
+            .min(target as f32 / orig_h.max(1) as f32);
+        let new_w = ((orig_w as f32 * scale).round() as u32).clamp(1, target);
+        let new_h = ((orig_h as f32 * scale).round() as u32).clamp(1, target);
+        let dw = (target - new_w) as f32 / 2.0;
+        let dh = (target - new_h) as f32 / 2.0;
+        let pad_left = (dw - 0.1).max(0.0).round() as u32;
+        let pad_top = (dh - 0.1).max(0.0).round() as u32;
+
+        Self {
+            scale,
+            new_w,
+            new_h,
+            pad_left,
+            pad_top,
+        }
+    }
+
+    fn unscale_xyxy(&self, bbox: [f32; 4], orig_w: f32, orig_h: f32) -> [f32; 4] {
+        let pad_x = self.pad_left as f32;
+        let pad_y = self.pad_top as f32;
+        [
+            ((bbox[0] - pad_x) / self.scale).clamp(0.0, orig_w),
+            ((bbox[1] - pad_y) / self.scale).clamp(0.0, orig_h),
+            ((bbox[2] - pad_x) / self.scale).clamp(0.0, orig_w),
+            ((bbox[3] - pad_y) / self.scale).clamp(0.0, orig_h),
+        ]
     }
 }
 
@@ -322,5 +362,18 @@ mod tests {
         assert_eq!(detections.len(), 2);
         assert_eq!(detections[0].0, 1);
         assert_eq!(detections[1].0, 0);
+    }
+
+    #[test]
+    fn letterbox_preserves_aspect_ratio_and_unscales_boxes() {
+        let lb = Letterbox::compute(640, 320, 320);
+        assert_eq!(lb.new_w, 320);
+        assert_eq!(lb.new_h, 160);
+        assert_eq!(lb.pad_left, 0);
+        assert_eq!(lb.pad_top, 80);
+
+        // Box covering the centered 320x160 image region maps back to [0, 0, 640, 320].
+        let unscaled = lb.unscale_xyxy([0.0, 80.0, 320.0, 240.0], 640.0, 320.0);
+        assert_eq!(unscaled, [0.0, 0.0, 640.0, 320.0]);
     }
 }
