@@ -1,0 +1,254 @@
+# CUDA Acceleration
+
+`ultralytics-inference` supports NVIDIA GPUs through three opt-in cargo features.
+
+| Feature           | Path                                                | When to use                                                                                      |
+| ----------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `cuda`            | ORT CUDA EP                                         | NVIDIA GPU, fast to set up, CUDA-only deps                                                       |
+| `tensorrt`        | ORT TensorRT EP (FP16, engine cache, opt-level 5)   | NVIDIA GPU with TensorRT installed; 2–3× faster than `cuda`                                      |
+| `cuda-preprocess` | GPU-side preprocess + zero-copy device input to TRT | maximum throughput; `YOLOModel::predict_image` transparently uses a fused CUDA preprocess kernel |
+
+`tensorrt` implies `cuda`, and `cuda-preprocess` implies `cuda` + `tensorrt`. When it's compiled in, no API change is required: `YOLOModel::predict_image` automatically routes through the GPU preprocess path on CUDA/TensorRT devices. Opt out per-model with [`InferenceConfig::with_cuda_preprocess(false)`](https://docs.rs/ultralytics-inference/latest/ultralytics_inference/inference/struct.InferenceConfig.html#method.with_cuda_preprocess).
+
+## Requirements
+
+| Component              | Tested      | How to verify                                                                                                            |
+| ---------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------ |
+| NVIDIA driver          | 580+        | `nvidia-smi`                                                                                                             |
+| CUDA toolkit           | 11.4 – 13.3 | `nvcc --version` _(toolkit only required for `cuda-preprocess`; `cuda` and `tensorrt` ship their EP libs through `ort`)_ |
+| TensorRT               | 10.x        | `ldconfig -p \| grep libnvinfer` (only for `tensorrt` / `cuda-preprocess`)                                               |
+| cuRAND                 | 10.x        | `libcurand.so.10` must be on the loader path for the CUDA execution provider                                             |
+| GPU compute capability | sm_70+      | `nvidia-smi --query-gpu=compute_cap --format=csv`                                                                        |
+
+> **Prebuilt EP binaries are CUDA 13.** ONNX Runtime deprecated CUDA 12, and the pinned `ort`
+> release ships no CUDA 12 distribution, so the `cuda` and `tensorrt` libraries it downloads are
+> built against CUDA 13. `ORT_CUDA_VERSION=12` does not help: it asks for a distribution that
+> does not exist and the build fails. To run the EPs on CUDA 12, compile ONNX Runtime yourself
+> and point `ort` at it with `ORT_LIB_PATH` (see [ort linking](https://ort.pyke.io/setup/linking)).
+> The toolkit range above is what `cuda-preprocess` compiles its kernel against through `cudarc`,
+> independent of which EP binary is linked.
+
+> **Blackwell and Jetson.** The prebuilt CUDA binaries cover RTX 50xx (Blackwell) cards on x64, which the GPU CI job
+> runs on, and `aarch64` builds cover Jetson Orin and Thor, Grace Hopper and Blackwell, and DGX Spark.
+
+The `cuda-preprocess` kernel uses `libcuda.so` (the driver) and `libnvrtc.so` at **runtime**, in addition to the inference provider's dependencies. Kernel code is compiled in-process via NVRTC, so `nvcc` is not invoked at runtime.
+
+## Enable in your project
+
+Add the feature you need in your `Cargo.toml`:
+
+```toml
+[dependencies]
+ultralytics-inference = { version = "0.0.61", features = ["tensorrt"] }
+# or, for the fastest path:
+ultralytics-inference = { version = "0.0.61", features = ["cuda-preprocess"] }
+```
+
+Then `cargo build --release`: no extra flags needed.
+
+For the CLI / examples in this repo directly:
+
+```bash
+cargo build --release --features tensorrt        # TensorRT EP
+cargo build --release --features cuda-preprocess # GPU preprocess (fastest)
+```
+
+### Selecting the CUDA toolkit version (`cuda-preprocess` only)
+
+`cuda-preprocess` depends on [`cudarc`](https://crates.io/crates/cudarc), which must be matched to your installed CUDA toolkit. By default it auto-detects via `nvcc --version`. If `nvcc` is not on `PATH`, set one of:
+
+```bash
+# Option 1: put nvcc on PATH
+export PATH=/usr/local/cuda/bin:$PATH
+
+# Option 2: tell cudarc directly (CUDA 13.2 -> 13020, CUDA 12.6 -> 12060)
+export CUDARC_CUDA_VERSION=13020
+```
+
+Supported toolkits: 11.4, 11.5, 11.6, 11.7, 11.8, 12.0, 12.1, 12.2, 12.3, 12.4, 12.5, 12.6, 12.8, 12.9, 13.0, 13.1, 13.2, 13.3, 13.4. (Full list and feature names: [cudarc Cargo.toml](https://github.com/chelsea0x3b/cudarc/blob/main/Cargo.toml).)
+
+If you need to pin a specific version at compile time instead, override the cudarc dep in your project's `Cargo.toml`:
+
+```toml
+[dependencies]
+ultralytics-inference = { version = "0.0.61", features = ["cuda-preprocess"] }
+# Replace the default feature with a pinned one (e.g. CUDA 12.8):
+cudarc = { version = "0.19", default-features = false, features = ["driver", "nvrtc", "dynamic-loading", "cuda-12080"] }
+```
+
+## Use
+
+### `tensorrt` feature
+
+```rust,no_run
+use ultralytics_inference::{Device, InferenceConfig, Quantization, YOLOModel};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = InferenceConfig::new()
+        .with_device(Device::TensorRt(0))
+        .with_quantize(Quantization::Fp16);
+    let mut model = YOLOModel::load_with_config("yolo26n.onnx", cfg)?;
+    let results = model.predict("image.jpg")?;
+    println!("{} detections", results.len());
+    Ok(())
+}
+```
+
+The first run builds and caches a TensorRT engine at `<model_dir>/.trt_cache/<model_stem>_fp16/` (one-time cost, ~1–3 minutes for medium models). Subsequent runs are instant.
+
+### ⏳ First-run engine build (warm-up) time
+
+The TensorRT EP compiles a hardware-specific engine the **first time a given
+model + input shape + precision is loaded**. This happens _during model load_
+(inside `YOLOModel::load*`), and it can take from tens of seconds to several
+minutes; it is **not** a hang.
+
+| Model input                            | Approx. first-build time |
+| -------------------------------------- | ------------------------ |
+| 640×640 (detect/seg/pose)              | ~30 s – 1 min            |
+| 1024×1024 (OBB) / 1024×2048 (semantic) | ~2 – 5 min               |
+
+What to expect and how to avoid surprises:
+
+- **It's cached.** Builds are written to `<model_dir>/.trt_cache/<stem>_{fp16,fp32}/` (`_fp16_o3/` for RT-DETR)
+  (engine **and** timing cache). Later loads of the same model reuse them and
+  start in seconds. **Keep `.trt_cache/` between runs** to avoid paying the cost
+  again: add it to `.gitignore` rather than deleting it, and leave it in place
+  across clean builds.
+- **Cache is keyed to the build context.** A new engine is built whenever the
+  model file, GPU/driver/TensorRT version, precision (`--quantize`), or **input
+  shape** changes. **Dynamic-shape models rebuild per new input size**: feed
+  consistently-sized inputs to keep it to a single cached engine. Note that rectangular
+  inference (`rect`, on by default) letterboxes each image to its own aspect ratio, so a
+  source with mixed aspect ratios produces one engine build per distinct shape; pass
+  `--rect false` to pin every input to the square model size.
+- **Warm up before timing.** The first `predict*` call also triggers an
+  inference-time warm-up. Always discard the first few iterations when
+  benchmarking (the examples do this).
+- **Pre-build in deployment.** Run one inference at startup (or ship a populated
+  `.trt_cache/`) so the first user request isn't stuck behind a multi-minute
+  build.
+
+> **Note on `.engine` files:** this crate runs models through ONNX Runtime's
+> TensorRT EP, which consumes **ONNX** and compiles/caches the engine internally.
+> You cannot load a standalone `.engine` file directly (that needs the native
+> TensorRT runtime); the `.trt_cache/` engine is an internal ORT artifact.
+
+### Sharing the GPU with other processes
+
+`InferenceConfig::with_cuda_memory_limit(bytes)` caps the CUDA EP's memory arena so a long-running session cannot take
+the whole card. The cap covers the arena only: the CUDA context and the cuDNN workspaces sit outside it, so peak device
+memory stays well above the limit, and a cap the model cannot run in fails the load. Detections and speed are unchanged
+by the cap. A `Device::TensorRt` session ignores the setting, and so does a limit of `0`.
+
+### `cuda-preprocess` feature
+
+No separate type or API. With the feature compiled in and a CUDA/TensorRT
+device, [`YOLOModel::predict_image`] automatically runs the fused GPU
+preprocess kernel (bilinear letterbox + `/255` normalize + HWC→CHW) and hands
+the result to ORT as a zero-copy device tensor. The kernel mirrors the CPU letterbox -
+same half-pixel bilinear sampling, same per-axis resampling ratios, and the same
+stride-aligned rectangular target under `rect`, so `--device cuda` and `--device cpu`
+agree to within one 8-bit quantization step (the CPU uses OpenCV's fixed-point weights,
+the kernel f32):
+
+```rust,no_run
+use ultralytics_inference::{Device, InferenceConfig, Quantization, YOLOModel};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = InferenceConfig::new()
+        .with_device(Device::TensorRt(0))
+        .with_quantize(Quantization::Fp16);
+    let mut model = YOLOModel::load_with_config("yolo26n.onnx", cfg)?;
+
+    // predict() decodes the frame and calls predict_image(), which
+    // transparently uses the GPU preprocess fast path:
+    let results = model.predict("image.jpg")?;
+    println!("{} detections", results.len());
+    Ok(())
+}
+```
+
+To force the standard CPU preprocess path (e.g. for an A/B comparison) without
+recompiling, set the flag to `false`:
+
+```rust,no_run
+use ultralytics_inference::{Device, InferenceConfig, Quantization, YOLOModel};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = InferenceConfig::new()
+        .with_device(Device::TensorRt(0))
+        .with_quantize(Quantization::Fp16)
+        .with_cuda_preprocess(false); // opt out; CPU letterbox + host→device copy
+    let _model = YOLOModel::load_with_config("yolo26n.onnx", cfg)?;
+    Ok(())
+}
+```
+
+The fast path is selected at load time when **all** of these hold; otherwise
+the CPU path runs and the flag is silently ignored:
+
+- the crate was built with the `cuda-preprocess` feature,
+- `cuda_preprocess` is `true` (the default),
+- the device is `Cuda(_)`, `TensorRt(_)`, or unset (auto-detect),
+- the task is not `Classify` (which uses center-crop, not letterbox),
+- the model takes an FP32 input tensor (FP16-input models keep the CPU path).
+
+`predict_batch` and the multi-image path use the same kernel, writing each image
+into its own slot of one `[N, 3, H, W]` device buffer, so a batch is uploaded
+without a host-side concatenation. A batch of more than one image keeps the CPU path
+for `Semantic` models.
+
+The source frame goes to the GPU as 8-bit RGB, a third of the bytes of the f32 tensor. On a
+discrete GPU it is first copied into a reused pinned host buffer, so the upload runs as an async
+DMA while the copy of the image that `Results` keeps is made on the CPU. On an RTX 4000 Ada that
+saved about 0.9 ms per 4K frame. An integrated GPU (DGX Spark, Jetson) keeps the plain copy,
+which is already cheaper there because the GPU shares memory with the CPU.
+
+On `TensorRt`, a model with static f32 batch-1 input and outputs (the default export) also replays its engine as one
+CUDA graph, which cut inference by up to about a quarter on an RTX 4000 Ada (yolo26n 0.95 to 0.7 ms). The graph is
+captured while the model loads, so CUDA work of your own on another thread during a load can fail.
+
+## CLI
+
+The CLI selects the GPU EP via `--device`:
+
+```bash
+ultralytics-inference predict --model yolo26n.onnx --source image.jpg \
+  --device tensorrt:0 --quantize 16
+```
+
+This uses the TensorRT EP (FP16 + engine cache). The CLI runs through the batch
+processor, which calls `predict_batch`; a single image there takes the same
+`cuda-preprocess` kernel as `predict_image`, so `--batch 1` uses it for the same tasks.
+
+```bash
+ultralytics-inference predict --model yolo26n-b16.onnx --source images/ \
+  --device tensorrt:0 --quantize 16 --batch 16
+```
+
+The model should be exported with a matching batch size, or with a dynamic batch
+axis. A model whose input pins `[16, 3, 640, 640]` always runs 16 images at a time:
+a larger request is split into chunks of 16, and a shorter one is padded with its
+last image, so `--batch 1` on it still pays for 16.
+
+With `--ocr`, the PaddleOCR text recognizer runs on the same GPU through the CUDA EP, also for a
+`tensorrt` detector (the `tensorrt` feature builds `cuda` too), since its input width changes with every crop:
+
+```bash
+ultralytics-inference predict --ocr --source sign.jpg --device cuda:0
+```
+
+[`YOLOModel::predict_image`]: https://docs.rs/ultralytics-inference/latest/ultralytics_inference/model/struct.YOLOModel.html#method.predict_image
+
+## Troubleshooting
+
+| Symptom                                                                 | Fix                                                                                                                                                                                                                      |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| ``cudarc-* build script failed: `nvcc --version` failed``               | Set `PATH` to include the toolkit's `bin/`, or set `CUDARC_CUDA_VERSION` (see above).                                                                                                                                    |
+| `libcudart.so.13: cannot open shared object file`                       | Toolkit not installed or not on `ld.so` path. Verify `ldconfig -p \| grep libcudart.so`.                                                                                                                                 |
+| `libcurand.so.10: cannot open shared object file`                       | Install cuRAND with the CUDA runtime libraries and expose its library directory to the loader. NVIDIA's `nvidia-curand` wheel is available for pip-based installations.                                                  |
+| `libnvinfer.so.10: cannot open shared object file`                      | TensorRT not installed. Required for `tensorrt` and `cuda-preprocess` features.                                                                                                                                          |
+| TRT engine build is slow on first run                                   | Expected: engines are cached under `.trt_cache/`. Subsequent runs reuse them.                                                                                                                                            |
+| CUDA EP fails to load on a CUDA 12 system                               | The downloaded binaries are CUDA 13 and no CUDA 12 build is published. Compile ONNX Runtime for CUDA 12 and link it with `ORT_LIB_PATH`.                                                                                 |
+| `no builds available that satisfy the requested feature set` on aarch64 | Only CUDA 13, TensorRT and NVRTX builds are published for `aarch64-unknown-linux-gnu`. For anything else link a GPU ONNX Runtime yourself, see [DGX.md](https://github.com/ultralytics/inference/blob/main/docs/DGX.md). |

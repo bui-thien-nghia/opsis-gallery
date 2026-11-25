@@ -1,0 +1,1870 @@
+// Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+//! Results classes for YOLO inference output.
+//!
+//! This module provides Ultralytics-compatible result classes with an
+//! API for easy migration and consistent usage patterns.
+
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, Axis, s};
+
+#[allow(clippy::wildcard_imports)] // native: rayon prelude; wasm: sequential shims
+use crate::parallel::*;
+use crate::utils::pluralize;
+use crate::visualizer::color::{Color, Colormap, DepthViz};
+
+/// Pixels handed to one task when colorizing a depth map across cores.
+const COLORIZE_CHUNK: usize = 4096;
+
+/// Timing information for inference operations (in milliseconds).
+#[derive(Debug, Clone, Default)]
+pub struct Speed {
+    /// Time spent on preprocessing.
+    pub preprocess: Option<f64>,
+    /// Time spent on model inference.
+    pub inference: Option<f64>,
+    /// Time spent on postprocessing.
+    pub postprocess: Option<f64>,
+}
+
+impl Speed {
+    /// Create a new Speed instance with all timings.
+    ///
+    /// # Arguments
+    ///
+    /// * `preprocess` - Time in milliseconds.
+    /// * `inference` - Time in milliseconds.
+    /// * `postprocess` - Time in milliseconds.
+    ///
+    /// # Returns
+    ///
+    /// * A new `Speed` instance.
+    #[must_use]
+    pub const fn new(preprocess: f64, inference: f64, postprocess: f64) -> Self {
+        Self {
+            preprocess: Some(preprocess),
+            inference: Some(inference),
+            postprocess: Some(postprocess),
+        }
+    }
+
+    /// Get total inference time.
+    ///
+    /// # Returns
+    ///
+    /// * Sum of preprocess, inference, and postprocess times in milliseconds.
+    #[must_use]
+    pub fn total(&self) -> f64 {
+        self.preprocess.unwrap_or(0.0)
+            + self.inference.unwrap_or(0.0)
+            + self.postprocess.unwrap_or(0.0)
+    }
+}
+
+/// Per-pixel class label map for semantic segmentation.
+#[derive(Debug, Clone)]
+pub struct SemanticMask {
+    /// Class index for each pixel, shape [H, W].
+    pub data: Array2<u16>,
+    /// Original image shape (height, width).
+    pub orig_shape: (u32, u32),
+}
+
+impl SemanticMask {
+    /// Sentinel class index for "ignore" pixels, e.g. classes filtered out by
+    /// [`InferenceConfig::with_classes`](crate::InferenceConfig::with_classes).
+    /// Renderers skip it and [`class_ids`](Self::class_ids) excludes it.
+    pub const IGNORE: u16 = u16::MAX;
+
+    /// Create a new `SemanticMask`.
+    #[must_use]
+    pub const fn new(data: Array2<u16>, orig_shape: (u32, u32)) -> Self {
+        Self { data, orig_shape }
+    }
+
+    /// Get the original image shape (height, width).
+    #[must_use]
+    pub const fn orig_shape(&self) -> (u32, u32) {
+        self.orig_shape
+    }
+
+    /// Count unique class IDs present in the mask.
+    #[must_use]
+    pub fn classes_present(&self) -> usize {
+        self.class_ids().len()
+    }
+
+    /// Return sorted unique class IDs present in the mask (excluding
+    /// [`IGNORE`](Self::IGNORE)).
+    #[must_use]
+    pub fn class_ids(&self) -> Vec<usize> {
+        let mut seen = vec![false; usize::from(u16::MAX) + 1];
+        for &v in &self.data {
+            seen[usize::from(v)] = true;
+        }
+        seen[usize::from(Self::IGNORE)] = false;
+        seen.iter()
+            .enumerate()
+            .filter_map(|(i, &present)| if present { Some(i) } else { None })
+            .collect()
+    }
+}
+
+/// Per-pixel depth map (in meters) for monocular depth estimation.
+#[derive(Debug, Clone)]
+pub struct DepthMap {
+    /// Depth value in meters for each pixel, shape [H, W].
+    pub data: Array2<f32>,
+    /// Original image shape (height, width).
+    pub orig_shape: (u32, u32),
+}
+
+impl DepthMap {
+    /// Create a new `DepthMap`.
+    #[must_use]
+    pub const fn new(data: Array2<f32>, orig_shape: (u32, u32)) -> Self {
+        Self { data, orig_shape }
+    }
+
+    /// `(min, max)` over the valid (`> 0`) depth pixels in one pass, or `None` if there are none.
+    /// Eight independent lanes let the compiler vectorize the scan.
+    fn valid_range(&self) -> Option<(f32, f32)> {
+        const LANES: usize = 8;
+        let scan = |lo: &mut [f32; LANES], hi: &mut [f32; LANES], chunk: &[f32]| {
+            for (i, &v) in chunk.iter().enumerate() {
+                let valid = v > 0.0;
+                lo[i] = if valid && v < lo[i] { v } else { lo[i] };
+                hi[i] = if valid && v > hi[i] { v } else { hi[i] };
+            }
+        };
+        let (mut lo, mut hi) = ([f32::INFINITY; LANES], [f32::NEG_INFINITY; LANES]);
+        let data = self.data.as_standard_layout();
+        let (chunks, rest) = data
+            .as_slice()
+            .expect("standard layout is contiguous")
+            .as_chunks::<LANES>();
+        for chunk in chunks {
+            scan(&mut lo, &mut hi, chunk);
+        }
+        scan(&mut lo, &mut hi, rest);
+        let lo = lo.into_iter().fold(f32::INFINITY, f32::min);
+        let hi = hi.into_iter().fold(f32::NEG_INFINITY, f32::max);
+        (lo <= hi).then_some((lo, hi))
+    }
+
+    /// Minimum depth in meters over valid (`> 0`) pixels, or `None` if there are none.
+    #[must_use]
+    pub fn min_depth(&self) -> Option<f32> {
+        self.valid_range().map(|(lo, _)| lo)
+    }
+
+    /// Maximum depth in meters over valid (`> 0`) pixels, or `None` if there are none.
+    #[must_use]
+    pub fn max_depth(&self) -> Option<f32> {
+        self.valid_range().map(|(_, hi)| hi)
+    }
+
+    /// Color-normalization range `(min, max)` for visualization: the valid-pixel span,
+    /// widened so `max > min`, falling back to `(0.0, 1.0)` when no pixels are valid.
+    fn value_range(&self) -> (f32, f32) {
+        match self.valid_range() {
+            Some((lo, hi)) if hi > lo => (lo, hi),
+            Some((lo, _)) => (lo, lo + 1e-6),
+            None => (0.0, 1.0),
+        }
+    }
+
+    /// Colorize into row-major RGB (`H*W` entries), invalid (`<= 0`) pixels black.
+    ///
+    /// Uses `colormap` and normalization `viz`; shared by the native and web depth renderers.
+    /// `Metric` normalizes the valid-pixel depth min/max (matches Python). `Disparity`
+    /// normalizes inverse depth (`1/d`) clipped to the 2–98 percentile, so near pixels read
+    /// warm and single-pixel outliers no longer wash out the range.
+    #[must_use]
+    pub fn colorize(&self, colormap: Colormap, viz: DepthViz) -> Vec<[u8; 3]> {
+        let data = &self.data;
+        let black = [0u8; 3];
+        // Per-viz normalization bounds: `Metric` maps depth directly over its valid min/max;
+        // `Disparity` maps inverse depth over its 2-98 percentile. Both then share the same
+        // per-pixel mapping below (invalid pixels black, everything else clamped to `[0, 1]`).
+        let (lo, inv, disparity) = match viz {
+            DepthViz::Metric => {
+                let (vmin, vmax) = self.value_range();
+                (vmin, 1.0 / (vmax - vmin), false)
+            }
+            DepthViz::Disparity => {
+                let Some((lo, hi)) = disparity_percentiles(data) else {
+                    return vec![black; data.len()];
+                };
+                (lo, 1.0 / (hi - lo).max(1e-6), true)
+            }
+        };
+        // Per-pixel colormap sampling over a full frame (590k pixels at 768x768), so it is
+        // worth spreading across cores; `crate::parallel` is sequential on wasm.
+        let Some(src) = data.as_slice() else {
+            // Non-contiguous storage cannot be chunked; fall back to the sequential map.
+            return data
+                .iter()
+                .map(|&d| Self::pixel(d, lo, inv, disparity, colormap, black))
+                .collect();
+        };
+        let mut out = vec![black; src.len()];
+        out.par_chunks_mut(COLORIZE_CHUNK)
+            .enumerate()
+            .for_each(|(c, dst)| {
+                let base = c * COLORIZE_CHUNK;
+                for (k, px) in dst.iter_mut().enumerate() {
+                    *px = Self::pixel(src[base + k], lo, inv, disparity, colormap, black);
+                }
+            });
+        out
+    }
+
+    /// Map one depth sample to its color: invalid (non-positive) pixels stay `black`,
+    /// everything else is normalized into `[0, 1]` and sampled from `colormap`.
+    #[inline]
+    fn pixel(
+        d: f32,
+        lo: f32,
+        inv: f32,
+        disparity: bool,
+        colormap: Colormap,
+        black: [u8; 3],
+    ) -> [u8; 3] {
+        if d > 0.0 {
+            let v = if disparity { 1.0 / d } else { d };
+            colormap.sample(((v - lo) * inv).clamp(0.0, 1.0))
+        } else {
+            black
+        }
+    }
+}
+
+/// Bin holding the value of a given rank in `hist`, and that rank's position inside the bin.
+fn locate(hist: &[u32], mut rank: usize) -> (usize, usize) {
+    for (bin, &count) in hist.iter().enumerate() {
+        if rank < count as usize {
+            return (bin, rank);
+        }
+        rank -= count as usize;
+    }
+    unreachable!("rank is below the sample count")
+}
+
+/// Return the 2nd and 98th percentiles of the inverse depth `1/d` over the positive samples
+/// (`None` when there are none).
+///
+/// Positive floats order like their bit patterns, so two counting passes (top 16 bits, then
+/// the low 16 bits inside the bins holding the two ranks) find the exact values without
+/// copying or partitioning the frame.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn disparity_percentiles(data: &ndarray::Array2<f32>) -> Option<(f32, f32)> {
+    let bits = |d: f32| (1.0 / d).to_bits();
+    let valid = || data.iter().copied().filter(|&d| d > 0.0);
+    let mut high = vec![0u32; 1 << 16];
+    for d in valid() {
+        high[(bits(d) >> 16) as usize] += 1;
+    }
+    let n: usize = high.iter().map(|&c| c as usize).sum();
+    if n == 0 {
+        return None;
+    }
+    let idx = |p: f32| ((p * (n - 1) as f32).round() as usize).min(n - 1);
+    let ((lo_bin, lo_rank), (hi_bin, hi_rank)) =
+        (locate(&high, idx(0.02)), locate(&high, idx(0.98)));
+    let mut lo_low = vec![0u32; 1 << 16];
+    let mut hi_low = vec![0u32; 1 << 16];
+    for b in valid().map(bits) {
+        if (b >> 16) as usize == lo_bin {
+            lo_low[(b & 0xFFFF) as usize] += 1;
+        }
+        if (b >> 16) as usize == hi_bin {
+            hi_low[(b & 0xFFFF) as usize] += 1;
+        }
+    }
+    let value = |bin: usize, low: &[u32], rank: usize| {
+        f32::from_bits(((bin as u32) << 16) | locate(low, rank).0 as u32)
+    };
+    Some((
+        value(lo_bin, &lo_low, lo_rank),
+        value(hi_bin, &hi_low, hi_rank),
+    ))
+}
+
+/// Main results container for YOLO inference.
+///
+/// Contains the original image, detection results (boxes, masks, keypoints, etc.), timing information, and metadata.
+#[derive(Debug, Clone)]
+pub struct Results {
+    /// Original image as HWC array (height, width, channels).
+    pub orig_img: Array3<u8>,
+    /// Original image shape (height, width).
+    pub orig_shape: (u32, u32),
+    /// Inference tensor shape (height, width) after letterboxing.
+    pub inference_shape: (u32, u32),
+    /// Detection bounding boxes (if applicable).
+    pub boxes: Option<Boxes>,
+    /// Segmentation masks (if applicable).
+    pub masks: Option<Masks>,
+    /// Pose keypoints (if applicable).
+    pub keypoints: Option<Keypoints>,
+    /// Classification probabilities (if applicable).
+    pub probs: Option<Probs>,
+    /// Oriented bounding boxes (if applicable).
+    pub obb: Option<Obb>,
+    /// Semantic segmentation class map (if applicable).
+    pub semantic_mask: Option<SemanticMask>,
+    /// Per-pixel depth map in meters (if applicable).
+    pub depth: Option<DepthMap>,
+    /// Inference timing information.
+    pub speed: Speed,
+    /// Class ID to name mapping.
+    pub names: Arc<HashMap<usize, String>>,
+    /// Per-class colors from the model's `colors` metadata, indexed by class ID; empty when it
+    /// has none. Drawing resolves each class through [`Color::for_class`].
+    pub colors: Arc<[Color]>,
+    /// Path to the source image/video.
+    pub path: String,
+}
+
+/// Format the class IDs in `cls` as a summary like `"4 persons, 1 bus"`.
+///
+/// Entries are sorted by class ID, names are pluralized via [`crate::utils::pluralize`] when
+/// the count is above 1, and unknown IDs fall back to `"object"`. Empty when `cls` is empty.
+fn format_class_counts(cls: &ArrayView1<'_, f32>, names: &HashMap<usize, String>) -> String {
+    let mut counts: BTreeMap<usize, usize> = BTreeMap::new();
+    for &c in cls {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let class_id = c as usize;
+        *counts.entry(class_id).or_insert(0) += 1;
+    }
+    counts
+        .iter()
+        .map(|(id, n)| {
+            let name = names.get(id).map_or("object", String::as_str);
+            let label = if *n > 1 {
+                pluralize(name)
+            } else {
+                name.to_string()
+            };
+            format!("{n} {label}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl Results {
+    /// Create a new Results instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `orig_img` - Original image as HWC array.
+    /// * `path` - Path to the source image/video.
+    /// * `names` - Map of class IDs to class names.
+    /// * `speed` - Timing information.
+    /// * `inference_shape` - Shape of the inference tensor (height, width).
+    ///
+    /// # Returns
+    ///
+    /// * A new `Results` instance.
+    #[must_use]
+    pub fn new(
+        orig_img: Array3<u8>,
+        path: String,
+        names: Arc<HashMap<usize, String>>,
+        speed: Speed,
+        inference_shape: (u32, u32),
+    ) -> Self {
+        let shape = orig_img.shape();
+        #[allow(clippy::cast_possible_truncation)]
+        let orig_shape = (shape[0] as u32, shape[1] as u32);
+
+        Self {
+            orig_img,
+            orig_shape,
+            inference_shape,
+            boxes: None,
+            masks: None,
+            keypoints: None,
+            probs: None,
+            obb: None,
+            semantic_mask: None,
+            depth: None,
+            speed,
+            names,
+            colors: Arc::default(),
+            path,
+        }
+    }
+
+    /// Get the number of detections.
+    ///
+    /// # Returns
+    ///
+    /// * The count of detected objects, keypoints, or instance masks.
+    ///   Semantic segmentation masks are per-pixel maps, not detections, so they return 0.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        if let Some(ref boxes) = self.boxes {
+            return boxes.len();
+        }
+        if let Some(ref masks) = self.masks {
+            return masks.len();
+        }
+        if let Some(ref keypoints) = self.keypoints {
+            return keypoints.len();
+        }
+        if let Some(ref probs) = self.probs {
+            return usize::from(!probs.data.is_empty());
+        }
+        if let Some(ref obb) = self.obb {
+            return obb.len();
+        }
+        0
+    }
+
+    /// Check if there are no detections.
+    ///
+    /// # Returns
+    ///
+    /// * `true` if no object-like results were detected.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Get the original image shape (height, width).
+    ///
+    /// # Returns
+    ///
+    /// * Tuple of (height, width).
+    #[must_use]
+    pub const fn orig_shape(&self) -> (u32, u32) {
+        self.orig_shape
+    }
+
+    /// Get the inference tensor shape (height, width) after letterboxing.
+    ///
+    /// # Returns
+    ///
+    /// * Tuple of (height, width).
+    #[must_use]
+    pub const fn inference_shape(&self) -> (u32, u32) {
+        self.inference_shape
+    }
+
+    /// One-line detection summary suitable for per-image verbose output.
+    ///
+    /// Formats as "4 persons, 1 bus" (no trailing punctuation).
+    /// Returns "(no detections)" when nothing was found.
+    #[must_use]
+    pub fn detection_summary(&self) -> String {
+        if let Some(ref sm) = self.semantic_mask {
+            let ids = sm.class_ids();
+            if ids.is_empty() {
+                return "(no detections)".to_string();
+            }
+            let shown: Vec<&str> = ids
+                .iter()
+                .map(|id| self.names.get(id).map_or("unknown", String::as_str))
+                .collect();
+            return shown.join(", ");
+        }
+
+        if let Some(ref depth) = self.depth {
+            return match depth.valid_range() {
+                Some((lo, hi)) => format!("depth {lo:.2}-{hi:.2}m"),
+                None => "depth (no valid pixels)".to_string(),
+            };
+        }
+
+        #[allow(clippy::option_if_let_else)]
+        let summary = if let Some(ref boxes) = self.boxes {
+            format_class_counts(&boxes.cls(), &self.names)
+        } else if let Some(ref obb) = self.obb {
+            format_class_counts(&obb.cls(), &self.names)
+        } else if let Some(ref probs) = self.probs {
+            probs
+                .top5()
+                .iter()
+                .map(|&i| {
+                    let name = self.names.get(&i).map_or("unknown", String::as_str);
+                    format!("{name} {:.2}", probs.data[[i]])
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        } else {
+            String::new()
+        };
+
+        if summary.is_empty() {
+            "(no detections)".to_string()
+        } else {
+            summary
+        }
+    }
+
+    /// Convert results to a list of dictionaries (summary format).
+    ///
+    /// Mirrors Ultralytics Python `Results.summary()`: classification yields one entry per
+    /// top-5 class, semantic segmentation one `{name, class, pixel_ratio}` entry per class
+    /// present, and detection, segmentation, pose and OBB one entry per instance with a `box`
+    /// of corner points (`x1..y2`, or `x1..y4` for OBB) plus `track_id` when tracking.
+    ///
+    /// # Arguments
+    ///
+    /// * `normalize` - Whether to normalize coordinates to [0, 1] range.
+    ///
+    /// # Returns
+    ///
+    /// * A vector of hashmaps representing the detections.
+    #[must_use]
+    pub fn summary(&self, normalize: bool) -> Vec<HashMap<String, SummaryValue>> {
+        // One `{name, class, <score>}` entry, the shared head of every summary row, where the
+        // score is `confidence`, or `pixel_ratio` for semantic segmentation.
+        let entry_for = |class_id: usize, score: &str, value: f32| {
+            HashMap::from([
+                (
+                    "name".to_string(),
+                    SummaryValue::String(
+                        self.names
+                            .get(&class_id)
+                            .cloned()
+                            .unwrap_or_else(|| class_id.to_string()),
+                    ),
+                ),
+                ("class".to_string(), SummaryValue::Int(class_id)),
+                (score.to_string(), SummaryValue::Float(value)),
+            ])
+        };
+
+        if let Some(ref probs) = self.probs {
+            return probs
+                .top5()
+                .into_iter()
+                .map(|i| entry_for(i, "confidence", probs.data[i]))
+                .collect();
+        }
+
+        if let Some(ref sm) = self.semantic_mask {
+            let mut counts = vec![0_usize; usize::from(u16::MAX) + 1];
+            for &v in &sm.data {
+                counts[usize::from(v)] += 1;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let total = sm.data.len() as f32;
+            let binary = self.names.len() == 1;
+            return counts
+                .into_iter()
+                .enumerate()
+                .filter(|&(_, n)| n > 0)
+                .filter_map(|(id, n)| match (binary, id) {
+                    // Binary maps store the single class as foreground 1 over background 0.
+                    (true, 1) => Some((0, n)),
+                    (false, _) if self.names.contains_key(&id) => Some((id, n)),
+                    _ => None,
+                })
+                .map(|(id, n)| {
+                    #[allow(clippy::cast_precision_loss)]
+                    entry_for(id, "pixel_ratio", n as f32 / total)
+                })
+                .collect();
+        }
+
+        // Corner points (N, P, 2) plus the per-row conf, class and optional track id.
+        let (corners, conf, cls, ids) = if let Some(ref obb) = self.obb {
+            (obb.xyxyxyxy(), obb.conf(), obb.cls(), obb.id())
+        } else if let Some(ref boxes) = self.boxes {
+            let xyxy = boxes.xyxy();
+            let corners =
+                Array3::from_shape_fn((boxes.len(), 2, 2), |(i, j, k)| xyxy[[i, 2 * j + k]]);
+            (corners, boxes.conf(), boxes.cls(), boxes.id())
+        } else {
+            return Vec::new();
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let (h, w) = if normalize {
+            (self.orig_shape.0 as f32, self.orig_shape.1 as f32)
+        } else {
+            (1.0, 1.0)
+        };
+
+        let mut results = Vec::with_capacity(corners.len_of(Axis(0)));
+        for (i, points) in corners.outer_iter().enumerate() {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let class_id = cls[i] as usize;
+            let mut entry = entry_for(class_id, "confidence", conf[i]);
+
+            let mut box_coords = HashMap::new();
+            for (j, p) in points.outer_iter().enumerate() {
+                box_coords.insert(format!("x{}", j + 1), SummaryValue::Float(p[0] / w));
+                box_coords.insert(format!("y{}", j + 1), SummaryValue::Float(p[1] / h));
+            }
+            entry.insert("box".to_string(), SummaryValue::Box(box_coords));
+
+            if let Some(ref ids) = ids {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                entry.insert("track_id".to_string(), SummaryValue::Int(ids[i] as usize));
+            }
+
+            results.push(entry);
+        }
+
+        results
+    }
+
+    /// Save the annotated result to a file.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to save the image to.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the image cannot be saved or if the format is unsupported.
+    #[cfg(feature = "annotate")]
+    pub fn save<P: AsRef<std::path::Path>>(&self, path: P) -> crate::error::Result<()> {
+        let img = crate::utils::array_to_image(&self.orig_img)?;
+        let annotated = crate::annotate::annotate_image(&img, self, None);
+        annotated
+            .save(path)
+            .map_err(|e| crate::error::InferenceError::ImageError(e.to_string()))
+    }
+}
+
+/// Values that can appear in a summary dictionary.
+#[derive(Debug, Clone)]
+pub enum SummaryValue {
+    /// String value.
+    String(String),
+    /// Integer value.
+    Int(usize),
+    /// Float value.
+    Float(f32),
+    /// Box coordinates.
+    Box(HashMap<String, Self>),
+}
+
+/// Detection bounding boxes.
+///
+/// Stores bounding boxes in xyxy format along with confidence scores and class IDs.
+#[derive(Debug, Clone)]
+pub struct Boxes {
+    /// Raw data array with shape (N, 6) containing [x1, y1, x2, y2, conf, cls].
+    /// Or shape (N, 7) if tracking: [x1, y1, x2, y2, `track_id`, conf, cls].
+    pub data: Array2<f32>,
+    /// Original image shape (height, width) for normalization.
+    pub orig_shape: (u32, u32),
+    /// Whether tracking IDs are present.
+    is_track: bool,
+}
+
+/// Normalize box rows in-place by image size: columns 0 and 2 are divided by the
+/// width and columns 1 and 3 by the height. Shared by the xyxy and xywh paths,
+/// both of which store x-like values in columns 0/2 and y-like values in 1/3.
+#[allow(clippy::cast_precision_loss)]
+fn normalize_box_rows(boxes: &mut Array2<f32>, orig_shape: (u32, u32)) {
+    let (h, w) = (orig_shape.0 as f32, orig_shape.1 as f32);
+    for mut row in boxes.rows_mut() {
+        row[0] /= w;
+        row[1] /= h;
+        row[2] /= w;
+        row[3] /= h;
+    }
+}
+
+/// Emit the row accessors shared by [`Boxes`] and [`Obb`]. Both store one detection per
+/// row ending in `[..., conf, cls]`, with an optional track id in the third column from
+/// the end, so only the row width that marks a tracking result differs.
+macro_rules! detection_accessors {
+    ($ty:ident, $track_cols:literal, $what:literal, $data_doc:literal) => {
+        impl $ty {
+            #[doc = concat!("Create a new `", stringify!($ty), "` instance.")]
+            ///
+            /// # Arguments
+            ///
+            #[doc = concat!("* `data` - ", $data_doc)]
+            /// * `orig_shape` - Original image shape (height, width).
+            ///
+            /// # Returns
+            ///
+            #[doc = concat!("* A new `", stringify!($ty), "` instance.")]
+            #[must_use]
+            pub fn new(data: Array2<f32>, orig_shape: (u32, u32)) -> Self {
+                let is_track = data.shape()[1] == $track_cols;
+                Self {
+                    data,
+                    orig_shape,
+                    is_track,
+                }
+            }
+
+            #[doc = concat!("Get the number of ", $what, ".")]
+            ///
+            /// # Returns
+            ///
+            #[doc = concat!("* The count of ", $what, ".")]
+            #[must_use]
+            pub fn len(&self) -> usize {
+                self.data.nrows()
+            }
+
+            #[doc = concat!("Check if there are no ", $what, ".")]
+            ///
+            /// # Returns
+            ///
+            /// * `true` if the array is empty.
+            #[must_use]
+            pub fn is_empty(&self) -> bool {
+                self.data.is_empty()
+            }
+
+            /// Get confidence scores.
+            ///
+            /// # Returns
+            ///
+            /// * A view of confidence scores (0.0 to 1.0).
+            #[must_use]
+            pub fn conf(&self) -> ArrayView1<'_, f32> {
+                self.data.slice(s![.., -2])
+            }
+
+            /// Get class IDs.
+            ///
+            /// # Returns
+            ///
+            /// * A view of class IDs.
+            #[must_use]
+            pub fn cls(&self) -> ArrayView1<'_, f32> {
+                self.data.slice(s![.., -1])
+            }
+
+            /// Get tracking IDs (if available).
+            ///
+            /// # Returns
+            ///
+            /// * `Some` view of track IDs if this is a tracking result, otherwise `None`.
+            #[must_use]
+            pub fn id(&self) -> Option<ArrayView1<'_, f32>> {
+                if self.is_track {
+                    Some(self.data.slice(s![.., -3]))
+                } else {
+                    None
+                }
+            }
+        }
+    };
+}
+
+detection_accessors!(
+    Boxes,
+    7,
+    "bounding boxes",
+    "Array with shape (N, 6) or (N, 7) containing box data."
+);
+
+impl Boxes {
+    /// Get boxes in xyxy format [x1, y1, x2, y2].
+    ///
+    /// # Returns
+    ///
+    /// * A view of the box coordinates.
+    #[must_use]
+    pub fn xyxy(&self) -> ArrayView2<'_, f32> {
+        self.data.slice(s![.., 0..4])
+    }
+
+    /// Get boxes in xywh format [`x_center`, `y_center`, width, height].
+    ///
+    /// # Returns
+    ///
+    /// * An owned array of boxes in xywh format.
+    #[must_use]
+    pub fn xywh(&self) -> Array2<f32> {
+        let xyxy = self.xyxy();
+        let n = xyxy.nrows();
+        let mut xywh = Array2::zeros((n, 4));
+
+        for i in 0..n {
+            let x1 = xyxy[[i, 0]];
+            let y1 = xyxy[[i, 1]];
+            let x2 = xyxy[[i, 2]];
+            let y2 = xyxy[[i, 3]];
+
+            xywh[[i, 0]] = f32::midpoint(x1, x2); // x_center
+            xywh[[i, 1]] = f32::midpoint(y1, y2); // y_center
+            xywh[[i, 2]] = x2 - x1; // width
+            xywh[[i, 3]] = y2 - y1; // height
+        }
+
+        xywh
+    }
+
+    /// Get boxes in xyxy format normalized by image size.
+    ///
+    /// # Returns
+    ///
+    /// * An owned array of normalized boxes [0.0-1.0].
+    #[must_use]
+    pub fn xyxyn(&self) -> Array2<f32> {
+        let mut xyxyn = self.xyxy().to_owned();
+        normalize_box_rows(&mut xyxyn, self.orig_shape);
+        xyxyn
+    }
+
+    /// Get boxes in xywh format normalized by image size.
+    ///
+    /// # Returns
+    ///
+    /// * An owned array of normalized boxes [0.0-1.0].
+    #[must_use]
+    pub fn xywhn(&self) -> Array2<f32> {
+        let mut xywhn = self.xywh();
+        normalize_box_rows(&mut xywhn, self.orig_shape);
+        xywhn
+    }
+
+    /// Check if tracking IDs are available.
+    ///
+    /// # Returns
+    ///
+    /// * `true` if the boxes contain tracking information.
+    #[must_use]
+    pub const fn is_track(&self) -> bool {
+        self.is_track
+    }
+}
+
+/// Per-instance segmentation masks produced by the `segment` task.
+///
+/// Holds the binary mask tensor, with mask outlines on the original image in [`xy`](Self::xy)
+/// and [`xyn`](Self::xyn).
+#[derive(Debug, Clone)]
+pub struct Masks {
+    /// Binary masks with shape (N, H, W), 1.0 inside each object, at the model input size like
+    /// Ultralytics, or at the original image size with `retina_masks` or tiling.
+    pub data: Array3<f32>,
+    /// Original image shape (height, width).
+    pub orig_shape: (u32, u32),
+}
+
+impl Masks {
+    /// Create a new Masks instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Raw mask data with shape (N, H, W).
+    /// * `orig_shape` - Original image shape (height, width).
+    ///
+    /// # Returns
+    ///
+    /// * A new `Masks` instance.
+    #[must_use]
+    pub const fn new(data: Array3<f32>, orig_shape: (u32, u32)) -> Self {
+        Self { data, orig_shape }
+    }
+
+    /// Get the number of masks.
+    ///
+    /// # Returns
+    ///
+    /// * The count of masks.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.data.shape()[0]
+    }
+
+    /// Check if there are no masks.
+    ///
+    /// # Returns
+    ///
+    /// * `true` if the masks array is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// The outline of each mask in image pixels, `(points, 2)` per mask, like Ultralytics
+    /// `Masks.xy`: the outer contours of the pixels above 0.5, traced like `OpenCV`
+    /// `findContours` with `RETR_EXTERNAL` and `CHAIN_APPROX_SIMPLE`, joined at their closest
+    /// points and scaled from the mask size to the image like `scale_coords`. A mask without
+    /// pixels has no points.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    pub fn xy(&self) -> Vec<Array2<f32>> {
+        let (_, mh, mw) = self.data.dim();
+        let (oh, ow) = self.orig_shape;
+        let [left, top, nw, nh] = crate::postprocessing::content_crop(mh, mw, oh, ow);
+        // Python's f64 gains, which NumPy rounds to f32 for f32 points.
+        let gain = [nw as f64 / f64::from(ow), nh as f64 / f64::from(oh)].map(|g| g as f32);
+        let (pad, size) = ([left as f32, top as f32], [ow as f32, oh as f32]);
+        self.data
+            .outer_iter()
+            .map(|mask| {
+                let points = merge_segments(external_contours(&mask));
+                Array2::from_shape_fn((points.len(), 2), |(i, k)| {
+                    ((points[i][k] as f32 - pad[k]) / gain[k]).clamp(0.0, size[k])
+                })
+            })
+            .collect()
+    }
+
+    /// The outlines of [`xy`](Self::xy) normalized by the image width and height.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn xyn(&self) -> Vec<Array2<f32>> {
+        let (h, w) = (self.orig_shape.0 as f32, self.orig_shape.1 as f32);
+        let mut outlines = self.xy();
+        for points in &mut outlines {
+            points.column_mut(0).mapv_inplace(|x| x / w);
+            points.column_mut(1).mapv_inplace(|y| y / h);
+        }
+        outlines
+    }
+}
+
+/// `OpenCV` chain code steps: right, then counterclockwise in image coordinates.
+const CHAIN: [[isize; 2]; 8] = [
+    [1, 0],
+    [1, -1],
+    [0, -1],
+    [-1, -1],
+    [-1, 0],
+    [-1, 1],
+    [0, 1],
+    [1, 1],
+];
+
+/// Outer contours of the pixels above 0.5, in the points and order of `OpenCV` 5
+/// `findContours(RETR_EXTERNAL, CHAIN_APPROX_SIMPLE)`: Suzuki border following over the mask
+/// padded by one pixel, keeping the points where the direction changes, newest contour first.
+#[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+fn external_contours(mask: &ArrayView2<f32>) -> Vec<Vec<[i32; 2]>> {
+    let (h, w) = mask.dim();
+    let pw = w + 2;
+    // 0 background, 1 foreground, then OpenCV's marks for traced pixels.
+    let mut img = vec![0_i8; (h + 2) * pw];
+    for ((y, x), &v) in mask.indexed_iter() {
+        img[(y + 1) * pw + x + 1] = i8::from(v > 0.5);
+    }
+    let mut contours = Vec::new();
+    // OpenCV's `lnbd`: the last border pixel met, whose mark tells whether a new outer border
+    // lies inside an earlier one.
+    let mut last = 0;
+    for y in 1..=h {
+        let (mut x, mut prev) = (1, 0_i8);
+        while x <= w {
+            let p = img[y * pw + x];
+            if p != prev {
+                if prev == 0 && p == 1 && img[y * pw + last] <= 0 {
+                    contours.push(trace(&mut img, pw, x, y));
+                    (last, prev) = (x, img[y * pw + x]);
+                    x += 1;
+                    continue;
+                }
+                if p == 0 && prev > 1 {
+                    last = x - 1;
+                }
+                if p & !1 != 0 {
+                    last = x;
+                }
+                prev = p;
+            }
+            x += 1;
+        }
+        last = 0;
+    }
+    contours.reverse();
+    contours
+}
+
+/// Follow the outer border starting at padded pixel `(x, y)` like `OpenCV`
+/// `icvFetchContourEx`, marking it in `img` and returning its corner points without the padding.
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn trace(img: &mut [i8], pw: usize, x: usize, y: usize) -> Vec<[i32; 2]> {
+    const NEW: i8 = 2;
+    const RIGHT: i8 = NEW | i8::MIN;
+    let at = |i: usize, s: usize| {
+        (i as isize + CHAIN[s % 8][0] + CHAIN[s % 8][1] * pw as isize) as usize
+    };
+    let i0 = y * pw + x;
+    let mut pt = [x as i32 - 1, y as i32 - 1];
+    // The first neighbor clockwise from the left, which is background.
+    let mut s = (0..8)
+        .map(|k| (11 - k) % 8)
+        .find(|&s| img[at(i0, s)] != 0)
+        .unwrap_or(4);
+    if s == 4 {
+        img[i0] = RIGHT;
+        return vec![pt];
+    }
+    let (i1, mut i3, mut prev_s) = (at(i0, s), i0, s ^ 4);
+    let mut points = Vec::new();
+    loop {
+        let s_end = s;
+        let mut t = s + 1;
+        while img[at(i3, t)] == 0 {
+            t += 1;
+        }
+        let i4 = at(i3, t);
+        s = t % 8;
+        if s.wrapping_sub(1) < s_end {
+            img[i3] = RIGHT;
+        } else if img[i3] == 1 {
+            img[i3] = NEW;
+        }
+        if s != prev_s {
+            points.push(pt);
+        }
+        prev_s = s;
+        pt = [pt[0] + CHAIN[s][0] as i32, pt[1] + CHAIN[s][1] as i32];
+        if i4 == i0 && i3 == i1 {
+            return points;
+        }
+        i3 = i4;
+        s = (s + 4) % 8;
+    }
+}
+
+/// One outline from several contours, as Ultralytics `merge_multi_segment` joins them: each
+/// pair of neighbors meets at its closest points, and the middle contours are walked there and
+/// back so the outline returns to the first one.
+fn merge_segments(mut segments: Vec<Vec<[i32; 2]>>) -> Vec<[i32; 2]> {
+    if segments.len() < 2 {
+        return segments.pop().unwrap_or_default();
+    }
+    let n = segments.len();
+    let mut ends = vec![Vec::new(); n];
+    for i in 1..n {
+        let (a, b) = closest(&segments[i - 1], &segments[i]);
+        ends[i - 1].push(a);
+        ends[i].push(b);
+    }
+    let mut out = Vec::new();
+    for (i, segment) in segments.iter_mut().enumerate() {
+        let mut idx = ends[i].clone();
+        if idx.len() == 2 && idx[0] > idx[1] {
+            idx = idx.iter().map(|&k| segment.len() - 1 - k).collect();
+            segment.reverse();
+        }
+        segment.rotate_left(idx[0]);
+        segment.push(segment[0]);
+        if i == 0 || i == n - 1 {
+            out.extend_from_slice(segment);
+        } else {
+            out.extend_from_slice(&segment[..=idx[1] - idx[0]]);
+        }
+    }
+    for i in (1..n - 1).rev() {
+        out.extend_from_slice(&segments[i][ends[i][1].abs_diff(ends[i][0])..]);
+    }
+    out
+}
+
+/// Indices of the closest pair of points between `a` and `b`, the first in row-major order.
+fn closest(a: &[[i32; 2]], b: &[[i32; 2]]) -> (usize, usize) {
+    let mut best = (0, 0, i64::MAX);
+    for (i, p) in a.iter().enumerate() {
+        for (j, q) in b.iter().enumerate() {
+            let d = i64::from(p[0] - q[0]).pow(2) + i64::from(p[1] - q[1]).pow(2);
+            if d < best.2 {
+                best = (i, j, d);
+            }
+        }
+    }
+    (best.0, best.1)
+}
+
+/// Skeletal keypoints produced by the `pose` task, one set per detected object.
+///
+/// Carries visibility scores only when the model exports three channels per keypoint;
+/// [`conf`](Self::conf) returns `None` otherwise.
+#[derive(Debug, Clone)]
+pub struct Keypoints {
+    /// Raw keypoint data with shape (N, K, 2) or (N, K, 3) if confidence included.
+    pub data: Array3<f32>,
+    /// Original image shape (height, width).
+    pub orig_shape: (u32, u32),
+    /// Whether confidence values are included.
+    has_visible: bool,
+}
+
+impl Keypoints {
+    /// Create a new Keypoints instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Raw keypoint data.
+    /// * `orig_shape` - Original image shape.
+    ///
+    /// # Returns
+    ///
+    /// * A new `Keypoints` instance.
+    #[must_use]
+    pub fn new(data: Array3<f32>, orig_shape: (u32, u32)) -> Self {
+        let has_visible = data.shape()[2] == 3;
+        Self {
+            data,
+            orig_shape,
+            has_visible,
+        }
+    }
+
+    /// Get the number of detected objects with keypoints.
+    ///
+    /// # Returns
+    ///
+    /// * The count of poses.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.data.shape()[0]
+    }
+
+    /// Check if there are no keypoints.
+    ///
+    /// # Returns
+    ///
+    /// * `true` if no keypoints were detected.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Get xy coordinates.
+    ///
+    /// # Returns
+    ///
+    /// * An owned array of keypoint coordinates.
+    #[must_use]
+    pub fn xy(&self) -> Array3<f32> {
+        self.data.slice(s![.., .., 0..2]).to_owned()
+    }
+
+    /// Get normalized xy coordinates.
+    ///
+    /// # Returns
+    ///
+    /// * An owned array of normalized keypoint coordinates.
+    #[must_use]
+    pub fn xyn(&self) -> Array3<f32> {
+        let mut xyn = self.xy();
+        #[allow(clippy::cast_precision_loss)]
+        let (h, w) = (self.orig_shape.0 as f32, self.orig_shape.1 as f32);
+
+        // Axis(2) has two lanes: index 0 holds x (normalize by width), index 1
+        // holds y (normalize by height).
+        for (axis_idx, mut lane) in xyn.axis_iter_mut(Axis(2)).enumerate() {
+            let divisor = if axis_idx == 0 { w } else { h };
+            lane.mapv_inplace(|v| v / divisor);
+        }
+
+        xyn
+    }
+
+    /// Get confidence values (if available).
+    ///
+    /// # Returns
+    ///
+    /// * `Some` array of confidences if available, otherwise `None`.
+    #[must_use]
+    pub fn conf(&self) -> Option<Array2<f32>> {
+        if self.has_visible {
+            Some(self.data.slice(s![.., .., 2]).to_owned())
+        } else {
+            None
+        }
+    }
+}
+
+/// Order two probabilities so that any NaN ranks below every real value, ascending otherwise.
+///
+/// `f32::total_cmp` alone would let a positive NaN win the top-1 argmax, since it orders NaN
+/// above infinity. Testing `is_nan` separately rather than substituting a sentinel keeps
+/// `f32::NEG_INFINITY` a distinct, orderable input.
+fn cmp_prob(a: f32, b: f32) -> std::cmp::Ordering {
+    b.is_nan().cmp(&a.is_nan()).then_with(|| a.total_cmp(&b))
+}
+
+/// Classification probabilities.
+///
+/// Stores class probabilities with convenience methods for top predictions.
+#[derive(Debug, Clone)]
+pub struct Probs {
+    /// Raw probability data with shape (`num_classes`,).
+    pub data: Array1<f32>,
+}
+
+impl Probs {
+    /// Create a new Probs instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Raw probability array.
+    ///
+    /// # Returns
+    ///
+    /// * A new `Probs` instance.
+    #[must_use]
+    pub const fn new(data: Array1<f32>) -> Self {
+        Self { data }
+    }
+
+    /// Get the index of the top-1 class.
+    ///
+    /// # Returns
+    ///
+    /// * The class ID with the highest probability.
+    #[must_use]
+    pub fn top1(&self) -> usize {
+        self.data
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| cmp_prob(**a, **b))
+            .map_or(0, |(i, _)| i)
+    }
+    /// Get the indices of the top-5 classes.
+    ///
+    /// # Returns
+    ///
+    /// * A vector of the top 5 class IDs sorted by probability.
+    #[must_use]
+    pub fn top5(&self) -> Vec<usize> {
+        self.top_k(5)
+    }
+
+    /// Get the indices of the top-k classes.
+    ///
+    /// # Arguments
+    ///
+    /// * `k` - The number of classes to return.
+    ///
+    /// # Returns
+    ///
+    /// * A vector of the top k class IDs sorted by probability.
+    #[must_use]
+    pub fn top_k(&self, k: usize) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..self.data.len()).collect();
+        indices.sort_by(|&a, &b| cmp_prob(self.data[b], self.data[a]));
+        indices.truncate(k);
+        indices
+    }
+
+    /// Get the confidence of the top-1 class.
+    ///
+    /// # Returns
+    ///
+    /// * The probability of the top class.
+    #[must_use]
+    pub fn top1conf(&self) -> f32 {
+        self.data[self.top1()]
+    }
+
+    /// Get the confidences of the top-5 classes.
+    ///
+    /// # Returns
+    ///
+    /// * A vector of the top 5 probabilities.
+    #[must_use]
+    pub fn top5conf(&self) -> Vec<f32> {
+        self.top5().iter().map(|&i| self.data[i]).collect()
+    }
+}
+
+/// Rotated bounding boxes produced by the `obb` task.
+///
+/// Boxes are stored as `xywhr`; [`xyxyxyxy`](Self::xyxyxyxy) expands them to corner points
+/// and [`xyxy`](Self::xyxy) gives the enclosing axis-aligned box.
+#[derive(Debug, Clone)]
+pub struct Obb {
+    /// Raw OBB data with shape (N, 7) containing [x, y, w, h, rotation, conf, cls].
+    /// Or shape (N, 8) if tracking.
+    pub data: Array2<f32>,
+    /// Original image shape (height, width).
+    pub orig_shape: (u32, u32),
+    /// Whether tracking IDs are present.
+    is_track: bool,
+}
+
+detection_accessors!(
+    Obb,
+    8,
+    "oriented bounding boxes",
+    "Raw OBB data with shape (N, 7) or (N, 8)."
+);
+
+impl Obb {
+    /// Get boxes in xywhr format [`x_center`, `y_center`, width, height, rotation].
+    ///
+    /// # Returns
+    ///
+    /// * A view of the box parameters.
+    #[must_use]
+    pub fn xywhr(&self) -> ArrayView2<'_, f32> {
+        self.data.slice(s![.., 0..5])
+    }
+
+    /// Get corner points for each OBB as (N, 4, 2) array.
+    /// Returns the 4 corner points of each rotated bounding box.
+    ///
+    /// # Returns
+    ///
+    /// * An owned array of shape (N, 4, 2) containing corner coordinates.
+    #[must_use]
+    pub fn xyxyxyxy(&self) -> Array3<f32> {
+        let n = self.len();
+        let mut corners = Array3::zeros((n, 4, 2));
+
+        for i in 0..n {
+            let cx = self.data[[i, 0]];
+            let cy = self.data[[i, 1]];
+            let w = self.data[[i, 2]];
+            let h = self.data[[i, 3]];
+            let angle = self.data[[i, 4]];
+
+            // Calculate corner offsets from center
+            let cos_a = angle.cos();
+            let sin_a = angle.sin();
+
+            // Half dimensions
+            let hw = w / 2.0;
+            let hh = h / 2.0;
+
+            // Corner offsets relative to center (before rotation), in the order of
+            // Ultralytics `xywhr2xyxyxyxy`.
+            let corners_rel = [(hw, hh), (hw, -hh), (-hw, -hh), (-hw, hh)];
+
+            // Apply rotation and translate to absolute coordinates
+            for (j, (dx, dy)) in corners_rel.iter().enumerate() {
+                let rotated_x = dx * cos_a - dy * sin_a;
+                let rotated_y = dx * sin_a + dy * cos_a;
+                corners[[i, j, 0]] = cx + rotated_x;
+                corners[[i, j, 1]] = cy + rotated_y;
+            }
+        }
+
+        corners
+    }
+
+    /// Get axis-aligned bounding box containing each OBB.
+    /// Returns array of shape (N, 4) with [x1, y1, x2, y2] for each OBB, not clipped to the image.
+    ///
+    /// # Returns
+    ///
+    /// * An owned array of axis-aligned bounding boxes.
+    #[must_use]
+    pub fn xyxy(&self) -> Array2<f32> {
+        let corners = self.xyxyxyxy();
+        let n = self.len();
+        let mut xyxy = Array2::zeros((n, 4));
+
+        for i in 0..n {
+            let mut min_x = f32::INFINITY;
+            let mut min_y = f32::INFINITY;
+            let mut max_x = f32::NEG_INFINITY;
+            let mut max_y = f32::NEG_INFINITY;
+
+            for j in 0..4 {
+                let x = corners[[i, j, 0]];
+                let y = corners[[i, j, 1]];
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+            }
+
+            xyxy[[i, 0]] = min_x;
+            xyxy[[i, 1]] = min_y;
+            xyxy[[i, 2]] = max_x;
+            xyxy[[i, 3]] = max_y;
+        }
+
+        xyxy
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::array;
+
+    /// An `n`x`n` black image with the given class names.
+    fn results(n: u32, names: &[(usize, &str)]) -> Results {
+        let names = names.iter().map(|&(i, s)| (i, s.to_string())).collect();
+        Results::new(
+            Array3::zeros((n as usize, n as usize, 3)),
+            String::new(),
+            Arc::new(names),
+            Speed::default(),
+            (n, n),
+        )
+    }
+
+    #[test]
+    fn test_boxes_xyxy() {
+        let data = array![[10.0, 20.0, 100.0, 200.0, 0.95, 0.0]];
+        let boxes = Boxes::new(data, (480, 640));
+
+        assert_eq!(boxes.len(), 1);
+        assert!((boxes.conf()[0] - 0.95).abs() < 1e-6);
+        assert!((boxes.cls()[0] - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_boxes_xywh() {
+        let data = array![[0.0, 0.0, 100.0, 100.0, 0.9, 1.0]];
+        let boxes = Boxes::new(data, (640, 640));
+        let xywh = boxes.xywh();
+
+        assert!((xywh[[0, 0]] - 50.0).abs() < 1e-6); // x_center
+        assert!((xywh[[0, 1]] - 50.0).abs() < 1e-6); // y_center
+        assert!((xywh[[0, 2]] - 100.0).abs() < 1e-6); // width
+        assert!((xywh[[0, 3]] - 100.0).abs() < 1e-6); // height
+    }
+
+    #[test]
+    fn test_boxes_normalized() {
+        let data = array![[0.0, 0.0, 320.0, 240.0, 0.9, 0.0]];
+        let boxes = Boxes::new(data, (480, 640));
+        let xyxyn = boxes.xyxyn();
+
+        assert!((xyxyn[[0, 0]] - 0.0).abs() < 1e-6);
+        assert!((xyxyn[[0, 1]] - 0.0).abs() < 1e-6);
+        assert!((xyxyn[[0, 2]] - 0.5).abs() < 1e-6); // 320/640
+        assert!((xyxyn[[0, 3]] - 0.5).abs() < 1e-6); // 240/480
+    }
+
+    #[test]
+    fn test_probs() {
+        let data = array![0.1, 0.3, 0.6];
+        let probs = Probs::new(data);
+
+        assert_eq!(probs.top1(), 2);
+        assert_eq!(probs.top5(), vec![2, 1, 0]);
+        assert!((probs.top1conf() - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_speed() {
+        let speed = Speed::new(10.0, 20.0, 5.0);
+        assert!((speed.total() - 35.0).abs() < 1e-6);
+    }
+    #[test]
+    fn test_semantic_mask_has_no_detection_len() {
+        let mut results = results(2, &[(0, "background")]);
+        results.semantic_mask = Some(SemanticMask::new(array![[0u16, 1], [1, 2]], (2, 2)));
+
+        assert_eq!(results.len(), 0);
+        assert!(results.is_empty());
+        assert_eq!(results.semantic_mask.as_ref().unwrap().classes_present(), 3);
+    }
+
+    #[test]
+    fn test_depth_map_summary_and_len() {
+        let mut results = results(2, &[]);
+        // Includes an invalid (0.0) pixel that must be excluded from min/max.
+        let depth = DepthMap::new(array![[0.0f32, 1.5], [3.0, 4.0]], (2, 2));
+        assert!((depth.min_depth().unwrap() - 1.5).abs() < 1e-6);
+        assert!((depth.max_depth().unwrap() - 4.0).abs() < 1e-6);
+        results.depth = Some(depth);
+
+        assert_eq!(results.len(), 0);
+        assert!(results.is_empty());
+        assert_eq!(results.detection_summary(), "depth 1.50-4.00m");
+    }
+
+    #[test]
+    #[allow(clippy::cast_precision_loss)]
+    fn test_depth_range_matches_a_scalar_scan() {
+        // 7 x 13 is not a multiple of the 8 scan lanes, with invalid values mixed in.
+        let values: Vec<f32> = (0..91)
+            .map(|i| match i % 9 {
+                0 => 0.0,
+                1 => -3.0,
+                _ => ((i * 37 % 91) as f32).mul_add(0.25, 0.5),
+            })
+            .collect();
+        let valid = || values.iter().copied().filter(|&v| v > 0.0);
+        let expected = (
+            valid().fold(f32::INFINITY, f32::min),
+            valid().fold(f32::NEG_INFINITY, f32::max),
+        );
+        let map = ndarray::Array2::from_shape_vec((7, 13), values.clone()).unwrap();
+        let depth = DepthMap::new(map.clone(), (7, 13));
+        assert_eq!(depth.valid_range(), Some(expected));
+        // A transposed view is not contiguous, so it takes the copying path.
+        let strided = DepthMap::new(map.reversed_axes(), (13, 7));
+        assert_eq!(strided.valid_range(), Some(expected));
+    }
+
+    #[test]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    fn test_disparity_percentiles_match_a_full_sort() {
+        // Pseudo-random depths with invalid (non-positive) samples mixed in.
+        let depths: Vec<f32> = (0..5000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 8) as f32 / 4000.0 - 1.0)
+            .collect();
+        let mut sorted: Vec<f32> = depths
+            .iter()
+            .filter(|&&d| d > 0.0)
+            .map(|&d| 1.0 / d)
+            .collect();
+        sorted.sort_by(f32::total_cmp);
+        let n = sorted.len();
+        let at = |p: f32| sorted[((p * (n - 1) as f32).round() as usize).min(n - 1)];
+
+        let (lo, hi) =
+            disparity_percentiles(&ndarray::Array2::from_shape_vec((50, 100), depths).unwrap())
+                .unwrap();
+        assert_eq!((lo, hi), (at(0.02), at(0.98)));
+        assert!(disparity_percentiles(&ndarray::array![[0.0, -1.0]]).is_none());
+    }
+
+    #[test]
+    fn test_depth_map_no_valid_pixels() {
+        let depth = DepthMap::new(array![[0.0f32, 0.0], [0.0, 0.0]], (2, 2));
+        assert!(depth.min_depth().is_none());
+        assert!(depth.max_depth().is_none());
+    }
+
+    #[test]
+    fn test_boxes_tracking_columns() {
+        // 7 columns => tracking: [x1, y1, x2, y2, track_id, conf, cls]
+        let data = array![[0.0, 0.0, 10.0, 10.0, 42.0, 0.9, 3.0]];
+        let boxes = Boxes::new(data, (100, 100));
+        assert!(boxes.is_track());
+        assert!((boxes.conf()[0] - 0.9).abs() < 1e-6);
+        assert!((boxes.cls()[0] - 3.0).abs() < 1e-6);
+        assert!((boxes.id().unwrap()[0] - 42.0).abs() < 1e-6);
+
+        // 6 columns => no tracking id.
+        let plain = Boxes::new(array![[0.0, 0.0, 10.0, 10.0, 0.9, 3.0]], (100, 100));
+        assert!(!plain.is_track());
+        assert!(plain.id().is_none());
+    }
+
+    #[test]
+    fn test_boxes_xywhn() {
+        let boxes = Boxes::new(array![[0.0, 0.0, 320.0, 240.0, 0.9, 0.0]], (480, 640));
+        let xywhn = boxes.xywhn();
+        // center (160,120) normalized -> (0.25, 0.25); size (320,240) -> (0.5, 0.5)
+        assert!((xywhn[[0, 0]] - 0.25).abs() < 1e-6);
+        assert!((xywhn[[0, 1]] - 0.25).abs() < 1e-6);
+        assert!((xywhn[[0, 2]] - 0.5).abs() < 1e-6);
+        assert!((xywhn[[0, 3]] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_masks_accessors() {
+        let masks = Masks::new(Array3::zeros((3, 8, 8)), (16, 16));
+        assert_eq!(masks.len(), 3);
+        assert!(!masks.is_empty());
+        assert_eq!(masks.orig_shape, (16, 16));
+        let empty = Masks::new(Array3::zeros((0, 8, 8)), (16, 16));
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_masks_xy_joins_outer_contours_like_opencv() {
+        // A ring, a single pixel and a block; the second mask is empty.
+        let rows = [
+            "........", ".###....", ".#.#..#.", ".###....", ".....###", ".....###",
+        ];
+        let mut data = Array3::zeros((2, 6, 8));
+        for (y, row) in rows.iter().enumerate() {
+            for (x, c) in row.chars().enumerate() {
+                data[[0, y, x]] = if c == '#' { 0.9 } else { 0.1 };
+            }
+        }
+        let masks = Masks::new(data, (6, 8));
+        // Ultralytics `masks2segments` on OpenCV 5 `findContours`: the outlines newest first,
+        // joined at their closest points and walked back.
+        let expected: [[u8; 2]; 13] = [
+            [5, 4],
+            [5, 5],
+            [7, 5],
+            [7, 4],
+            [5, 4],
+            [6, 2],
+            [3, 3],
+            [3, 1],
+            [1, 1],
+            [1, 3],
+            [3, 3],
+            [6, 2],
+            [6, 2],
+        ];
+        let xy = masks.xy();
+        assert_eq!(
+            xy[0],
+            Array2::from_shape_fn((13, 2), |(i, k)| f32::from(expected[i][k]))
+        );
+        assert_eq!(xy[1].dim(), (0, 2));
+        assert_eq!(masks.xyn()[0].row(0).to_vec(), [5.0 / 8.0, 4.0 / 6.0]);
+    }
+
+    #[test]
+    fn test_keypoints_with_and_without_conf() {
+        // (N, K, 3) => has visibility/confidence channel.
+        let mut data = Array3::zeros((1, 2, 3));
+        data[[0, 0, 0]] = 320.0;
+        data[[0, 0, 1]] = 240.0;
+        data[[0, 0, 2]] = 0.8;
+        let kpts = Keypoints::new(data, (480, 640));
+        assert_eq!(kpts.len(), 1);
+        assert!(!kpts.is_empty());
+        let xy = kpts.xy();
+        assert_eq!(xy.shape(), [1, 2, 2]);
+        assert!((xy[[0, 0, 0]] - 320.0).abs() < 1e-6);
+        assert!((xy[[0, 0, 1]] - 240.0).abs() < 1e-6);
+        // xyn normalizes x by width and y by height independently.
+        let xyn = kpts.xyn();
+        assert_eq!(xyn.shape(), [1, 2, 2]);
+        assert!((xyn[[0, 0, 0]] - 0.5).abs() < 1e-6); // 320 / 640
+        assert!((xyn[[0, 0, 1]] - 0.5).abs() < 1e-6); // 240 / 480
+        assert!(kpts.conf().is_some());
+
+        // (N, K, 2) => no confidence.
+        let no_conf = Keypoints::new(Array3::zeros((1, 2, 2)), (480, 640));
+        assert!(no_conf.conf().is_none());
+    }
+
+    #[test]
+    fn test_probs_top_k_and_conf() {
+        let probs = Probs::new(array![0.1, 0.7, 0.15, 0.05]);
+        assert_eq!(probs.top1(), 1);
+        assert_eq!(probs.top_k(2), vec![1, 2]);
+        assert_eq!(probs.top5(), vec![1, 2, 0, 3]); // only 4 classes
+        assert!((probs.top1conf() - 0.7).abs() < 1e-6);
+        let c5 = probs.top5conf();
+        assert!((c5[0] - 0.7).abs() < 1e-6);
+    }
+
+    /// A NaN probability used to panic in `top1`, and with it `top1conf`, `top5conf`, and
+    /// `summary`. `total_cmp` orders NaN instead, so the real class still wins.
+    #[test]
+    fn test_probs_with_nan_does_not_panic() {
+        let probs = Probs::new(array![0.1, f32::NAN, 0.7, 0.05]);
+        assert_eq!(probs.top1(), 2, "NaN ranks below a real probability");
+        assert!((probs.top1conf() - 0.7).abs() < 1e-6);
+        assert_eq!(probs.top_k(4), vec![2, 0, 3, 1], "the NaN class sorts last");
+        assert_eq!(probs.top5conf().len(), 4);
+
+        // Negative infinity is a real value, so it must still outrank a NaN. A sentinel-based
+        // ranking would tie these two and hand the argmax to the NaN.
+        let probs = Probs::new(array![f32::NEG_INFINITY, f32::NAN]);
+        assert_eq!(probs.top1(), 0);
+        assert_eq!(probs.top_k(2), vec![0, 1]);
+
+        // All-NaN input still has to return an in-range index rather than panicking.
+        let probs = Probs::new(array![f32::NAN, f32::NAN]);
+        assert!(probs.top1() < 2);
+    }
+
+    #[test]
+    fn test_obb_accessors_and_geometry() {
+        // [x, y, w, h, rotation, conf, cls] with zero rotation.
+        let data = array![[50.0, 50.0, 20.0, 10.0, 0.0, 0.9, 1.0]];
+        let obb = Obb::new(data, (100, 100));
+        assert_eq!(obb.len(), 1);
+        assert!(!obb.is_empty());
+        assert!((obb.conf()[0] - 0.9).abs() < 1e-6);
+        assert!((obb.cls()[0] - 1.0).abs() < 1e-6);
+        assert!(obb.id().is_none());
+        assert_eq!(obb.xywhr().shape(), [1, 5]);
+
+        // With zero rotation the axis-aligned bbox is the centered w×h rectangle.
+        let xyxy = obb.xyxy();
+        assert!((xyxy[[0, 0]] - 40.0).abs() < 1e-4); // 50 - 10
+        assert!((xyxy[[0, 1]] - 45.0).abs() < 1e-4); // 50 - 5
+        assert!((xyxy[[0, 2]] - 60.0).abs() < 1e-4); // 50 + 10
+        assert!((xyxy[[0, 3]] - 55.0).abs() < 1e-4); // 50 + 5
+        assert_eq!(obb.xyxyxyxy().shape(), [1, 4, 2]);
+
+        // 8 columns => tracking id present.
+        let tracked = Obb::new(
+            array![[50.0, 50.0, 20.0, 10.0, 0.0, 7.0, 0.9, 1.0]],
+            (100, 100),
+        );
+        assert!(tracked.id().is_some());
+    }
+
+    #[test]
+    fn test_results_len_dispatch() {
+        let make = || results(4, &[]);
+
+        let mut r = make();
+        r.boxes = Some(Boxes::new(array![[0.0, 0.0, 1.0, 1.0, 0.9, 0.0]], (4, 4)));
+        assert_eq!(r.len(), 1);
+        assert_eq!(r.orig_shape(), (4, 4));
+        assert_eq!(r.inference_shape(), (4, 4));
+
+        let mut r = make();
+        r.keypoints = Some(Keypoints::new(Array3::zeros((2, 3, 3)), (4, 4)));
+        assert_eq!(r.len(), 2);
+
+        let mut r = make();
+        r.probs = Some(Probs::new(array![0.2, 0.8]));
+        assert_eq!(r.len(), 1);
+
+        let empty = make();
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_detection_summary_variants() {
+        let mut r = results(4, &[(0, "person"), (5, "bus")]);
+
+        // No detections.
+        assert_eq!(r.detection_summary(), "(no detections)");
+
+        // Two persons + one bus -> pluralized, class-id sorted.
+        r.boxes = Some(Boxes::new(
+            array![
+                [0.0, 0.0, 1.0, 1.0, 0.9, 0.0],
+                [0.0, 0.0, 1.0, 1.0, 0.8, 0.0],
+                [0.0, 0.0, 1.0, 1.0, 0.7, 5.0]
+            ],
+            (4, 4),
+        ));
+        assert_eq!(r.detection_summary(), "2 persons, 1 bus");
+
+        // Single box, unknown class falls back to "object", empty boxes.
+        r.boxes = Some(Boxes::new(array![[0.0, 0.0, 1.0, 1.0, 0.9, 0.0]], (4, 4)));
+        assert_eq!(r.detection_summary(), "1 person");
+        r.boxes = Some(Boxes::new(array![[0.0, 0.0, 1.0, 1.0, 0.9, 99.0]], (4, 4)));
+        assert_eq!(r.detection_summary(), "1 object");
+        r.boxes = Some(Boxes::new(Array2::zeros((0, 6)), (4, 4)));
+        assert_eq!(r.detection_summary(), "(no detections)");
+
+        // OBB counts, then empty OBB.
+        r.boxes = None;
+        r.obb = Some(Obb::new(
+            array![
+                [2.0, 2.0, 2.0, 1.0, 0.5, 0.9, 5.0],
+                [2.0, 2.0, 1.0, 1.0, 0.3, 0.8, 5.0]
+            ],
+            (4, 4),
+        ));
+        assert_eq!(r.detection_summary(), "2 buses");
+        r.obb = Some(Obb::new(Array2::zeros((0, 7)), (4, 4)));
+        assert_eq!(r.detection_summary(), "(no detections)");
+
+        // Classification lists top-5 names with scores.
+        r.obb = None;
+        r.probs = Some(Probs::new(array![0.3, 0.0, 0.0, 0.0, 0.0, 0.7]));
+        assert_eq!(
+            r.detection_summary(),
+            "bus 0.70, person 0.30, unknown 0.00, unknown 0.00, unknown 0.00"
+        );
+
+        // Semantic masks list the classes present.
+        r.semantic_mask = Some(SemanticMask::new(array![[0u16, 5], [5, 5]], (2, 2)));
+        assert_eq!(r.detection_summary(), "person, bus");
+    }
+
+    #[test]
+    fn test_summary_boxes_and_probs() {
+        let mut r = results(10, &[(0, "person")]);
+        r.boxes = Some(Boxes::new(array![[0.0, 0.0, 5.0, 5.0, 0.9, 0.0]], (10, 10)));
+
+        let raw = r.summary(false);
+        assert_eq!(raw.len(), 1);
+        assert!(matches!(raw[0].get("name"), Some(SummaryValue::String(s)) if s == "person"));
+        assert!(matches!(raw[0].get("box"), Some(SummaryValue::Box(_))));
+        let norm = r.summary(true);
+        let Some(SummaryValue::Box(b)) = norm[0].get("box") else {
+            panic!("expected a box entry");
+        };
+        assert!(matches!(b.get("x2"), Some(SummaryValue::Float(x)) if (x - 0.5).abs() < 1e-6));
+
+        // Tracked boxes add `track_id`.
+        r.boxes = Some(Boxes::new(
+            array![[0.0, 0.0, 5.0, 5.0, 3.0, 0.9, 0.0]],
+            (10, 10),
+        ));
+        let tracked = r.summary(false);
+        assert!(matches!(
+            tracked[0].get("track_id"),
+            Some(SummaryValue::Int(3))
+        ));
+
+        // OBB rows carry all four corners as x1..y4.
+        r.boxes = None;
+        r.obb = Some(Obb::new(
+            array![[5.0, 5.0, 4.0, 2.0, 0.0, 0.8, 0.0]],
+            (10, 10),
+        ));
+        let obb = r.summary(false);
+        let Some(SummaryValue::Box(b)) = obb[0].get("box") else {
+            panic!("expected a box entry");
+        };
+        assert_eq!(b.len(), 8);
+        assert!(matches!(b.get("x4"), Some(SummaryValue::Float(x)) if (x - 3.0).abs() < 1e-6));
+        assert!(matches!(b.get("y4"), Some(SummaryValue::Float(y)) if (y - 6.0).abs() < 1e-6));
+        assert!(!obb[0].contains_key("track_id"));
+
+        // Binary semantic maps report foreground 1 as the single class 0.
+        r.obb = None;
+        r.semantic_mask = Some(SemanticMask::new(array![[1, 1, 1, 0]], (1, 4)));
+        let sem = r.summary(false);
+        assert_eq!(sem.len(), 1);
+        assert!(matches!(sem[0].get("class"), Some(SummaryValue::Int(0))));
+        assert!(
+            matches!(sem[0].get("pixel_ratio"), Some(SummaryValue::Float(p)) if (p - 0.75).abs() < 1e-6)
+        );
+        assert!(!sem[0].contains_key("confidence"));
+
+        // Multi-class maps yield per-class ratios in class order, skipping unnamed labels.
+        r.names = Arc::new(HashMap::from([
+            (0, "bg".to_string()),
+            (1, "road".to_string()),
+        ]));
+        r.semantic_mask = Some(SemanticMask::new(
+            array![[1, 1, 0, SemanticMask::IGNORE]],
+            (1, 4),
+        ));
+        let sem = r.summary(false);
+        assert_eq!(sem.len(), 2);
+        assert!(matches!(sem[1].get("name"), Some(SummaryValue::String(s)) if s == "road"));
+        assert!(
+            matches!(sem[1].get("pixel_ratio"), Some(SummaryValue::Float(p)) if (p - 0.5).abs() < 1e-6)
+        );
+
+        // Probs summary returns one entry per top-5 class, best first.
+        let mut rp = results(4, &[(0, "person")]);
+        rp.probs = Some(Probs::new(array![0.1, 0.9]));
+        let ps = rp.summary(true);
+        assert_eq!(ps.len(), 2);
+        assert!(matches!(ps[0].get("class"), Some(SummaryValue::Int(1))));
+        assert!(matches!(ps[1].get("name"), Some(SummaryValue::String(s)) if s == "person"));
+    }
+
+    #[cfg(feature = "annotate")]
+    #[test]
+    fn test_results_save_writes_file() {
+        let mut r = results(16, &[(0, "person")]);
+        r.boxes = Some(Boxes::new(
+            array![[1.0, 1.0, 10.0, 10.0, 0.9, 0.0]],
+            (16, 16),
+        ));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("annotated.png");
+        r.save(&out).unwrap();
+        assert!(out.exists());
+    }
+}

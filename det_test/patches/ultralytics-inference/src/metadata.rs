@@ -1,0 +1,664 @@
+// Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+//! ONNX model metadata parsing.
+//!
+//! This module handles parsing metadata from Ultralytics YOLO ONNX models.
+//! The metadata is stored as YAML in the ONNX model's custom metadata properties.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::error::{InferenceError, Result};
+use crate::inference::{InferenceConfig, Quantization};
+use crate::task::Task;
+use crate::visualizer::color::Color;
+
+/// Metadata extracted from an Ultralytics YOLO ONNX model.
+///
+/// This struct contains all the configuration information embedded in the model,
+/// including class names, input dimensions, and task type.
+#[derive(Debug, Clone)]
+pub struct ModelMetadata {
+    /// Model description (e.g., "Ultralytics `YOLO11n` model trained on coco.yaml").
+    pub description: String,
+    /// Model author.
+    pub author: String,
+    /// Export date.
+    pub date: String,
+    /// Ultralytics version used for export.
+    pub version: String,
+    /// License information.
+    pub license: String,
+    /// Documentation URL.
+    pub docs: String,
+    /// The task this model performs.
+    pub task: Task,
+    /// Detection head class recorded by the export (e.g. `"Detect"`, `"RTDETRDecoder"`),
+    /// empty for exports that predate the `head` metadata key.
+    pub head: String,
+    /// Model stride (typically 32 for YOLO).
+    pub stride: u32,
+    /// Batch size the model was exported with.
+    pub batch: usize,
+    /// Input image size as (height, width).
+    pub imgsz: Option<(usize, usize)>,
+    /// Number of input channels (typically 3 for RGB).
+    pub channels: usize,
+    /// Precision recorded by the model export metadata.
+    pub quantize: Option<Quantization>,
+    /// Class ID to class name mapping.
+    pub names: Arc<HashMap<usize, String>>,
+    /// Per-class colors from the optional `colors` metadata (`#rrggbb` strings indexed by class
+    /// ID); empty when the model has none, and classes without an entry use the palette.
+    pub colors: Arc<[Color]>,
+    /// Whether the graph uses the NMS-free one-to-one head, from the `end2end` metadata key
+    /// (selected with `nms=False` when available; output: `[B, max_det, 6+extra]`).
+    pub end2end: bool,
+    /// Pose keypoint shape as (`num_keypoints`, `dims`), e.g. (17, 3).
+    pub kpt_shape: Option<(usize, usize)>,
+}
+
+impl ModelMetadata {
+    /// Parse metadata from a YAML string.
+    ///
+    /// # Arguments
+    ///
+    /// * `yaml_str` - The YAML-formatted metadata string.
+    ///
+    /// # Returns
+    ///
+    /// * A new `ModelMetadata` instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the YAML is malformed or missing required fields.
+    pub fn from_yaml_str(yaml_str: &str) -> Result<Self> {
+        let mut metadata = Self::default();
+        let mut names: HashMap<usize, String> = HashMap::new();
+        let mut quantize_set = false;
+        let mut half = None;
+
+        for line in yaml_str.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            // Handle key: value pairs
+            if let Some((key, value)) = line.split_once(':') {
+                let key = key.trim();
+                let value = Self::unquote(value);
+
+                match key {
+                    "description" => metadata.description = value.to_string(),
+                    "head" => metadata.head = value.to_string(),
+                    "author" => metadata.author = value.to_string(),
+                    "date" => metadata.date = value.to_string(),
+                    "version" => metadata.version = value.to_string(),
+                    "license" => metadata.license = value.to_string(),
+                    "docs" => metadata.docs = value.to_string(),
+                    "task" => {
+                        metadata.task = value.parse().map_err(|e| {
+                            InferenceError::ModelLoadError(format!("Invalid task in metadata: {e}"))
+                        })?;
+                    }
+                    "stride" => metadata.stride = Self::parse_field(value, "stride")?,
+                    "batch" => metadata.batch = Self::parse_field(value, "batch")?,
+                    "channels" => metadata.channels = Self::parse_field(value, "channels")?,
+                    "quantize" => {
+                        metadata.quantize = Self::parse_quantize(value)?;
+                        quantize_set = true;
+                    }
+                    "half" => {
+                        half = Some(Self::parse_bool(value));
+                    }
+                    "end2end" => {
+                        metadata.end2end = value == "true" || value == "True";
+                    }
+                    "args" => {
+                        if !quantize_set
+                            && let Some(value) = Self::parse_args_value(value, "quantize")
+                        {
+                            metadata.quantize = Self::parse_quantize(value)?;
+                            quantize_set = true;
+                        }
+                        if half.is_none()
+                            && let Some(value) = Self::parse_args_value(value, "half")
+                        {
+                            half = Some(Self::parse_bool(value));
+                        }
+                    }
+                    // Class name entries have numeric keys.
+                    _ => Self::insert_class_entry(&mut names, line),
+                }
+            }
+        }
+
+        if !quantize_set {
+            // `half` here is the model's own export metadata, not a user-supplied
+            // flag, so it maps straight through without the deprecation warning.
+            metadata.quantize = half.unwrap_or(false).then_some(Quantization::Fp16);
+        }
+
+        // imgsz is a two-integer list (`[640, 640]` inline or a `- 640` block),
+        // parsed with the same helper as kpt_shape.
+        metadata.imgsz = Self::parse_int_pair(yaml_str, "imgsz");
+
+        // kpt_shape is a two-integer list (inline `[17, 3]` or a `- 17` block),
+        // parsed with the same helper as imgsz.
+        metadata.kpt_shape = Self::parse_int_pair(yaml_str, "kpt_shape");
+
+        // colors is a list of `#rrggbb` strings; one unreadable entry discards them all, so no
+        // class takes another's color.
+        metadata.colors = Self::parse_list(yaml_str, "colors", |items| {
+            items
+                .into_iter()
+                .map(Color::from_hex)
+                .collect::<Option<_>>()
+        })
+        .unwrap_or_default();
+
+        // Parse names block if not already parsed inline
+        if names.is_empty() {
+            names = Self::parse_names_block(yaml_str);
+        }
+
+        metadata.names = Arc::new(names);
+        Ok(metadata)
+    }
+
+    /// Strip surrounding whitespace and any wrapping single or double quotes.
+    fn unquote(value: &str) -> &str {
+        value.trim().trim_matches(|c| c == '\'' || c == '"')
+    }
+
+    /// Parse a scalar metadata field, reporting the field name on failure.
+    fn parse_field<T: std::str::FromStr>(value: &str, name: &str) -> Result<T> {
+        value
+            .parse()
+            .map_err(|_| InferenceError::ModelLoadError(format!("Invalid {name} value: {value}")))
+    }
+
+    /// Insert a `class_id: name` entry into `names`, ignoring anything that is not one.
+    /// A bare `0:` is the head of a nested list such as `kpt_names`, not a class.
+    fn insert_class_entry(names: &mut HashMap<usize, String>, entry: &str) {
+        if let Some((key, value)) = entry.split_once(':')
+            && let Ok(class_id) = key.trim().parse::<usize>()
+            && !value.trim().is_empty()
+        {
+            names.insert(class_id, Self::unquote(value).to_string());
+        }
+    }
+
+    fn parse_quantize(value: &str) -> Result<Option<Quantization>> {
+        let value = Self::unquote(value);
+        if value.eq_ignore_ascii_case("none")
+            || value.eq_ignore_ascii_case("null")
+            || value.is_empty()
+        {
+            return Ok(None);
+        }
+        value.parse().map(Some).map_err(|e| {
+            InferenceError::ModelLoadError(format!("Invalid quantize value in metadata: {e}"))
+        })
+    }
+
+    fn parse_args_value<'a>(args: &'a str, name: &str) -> Option<&'a str> {
+        let single_quoted = format!("'{name}'");
+        let double_quoted = format!("\"{name}\"");
+        let (_, value) = [single_quoted.as_str(), double_quoted.as_str()]
+            .iter()
+            .find_map(|key| args.split_once(key))?;
+        Some(
+            value
+                .trim_start()
+                .strip_prefix(':')
+                .unwrap_or(value)
+                .split([',', '}'])
+                .next()
+                .unwrap_or_default(),
+        )
+    }
+
+    fn parse_bool(value: &str) -> bool {
+        !matches!(
+            Self::unquote(value).to_ascii_lowercase().as_str(),
+            "none" | "false" | "0" | ""
+        )
+    }
+
+    /// Parse a two-integer YAML list for `key` (see [`Self::parse_list`]), returning its first
+    /// two integers.
+    fn parse_int_pair(yaml_str: &str, key: &str) -> Option<(usize, usize)> {
+        Self::parse_list(yaml_str, key, |items| {
+            let mut nums = items.iter().filter_map(|s| s.parse().ok());
+            Some((nums.next()?, nums.next()?))
+        })
+    }
+
+    /// Read the YAML list for `key` with `parse`, accepting either the inline form
+    /// (`key: [a, b]` / `key: a, b`) or a multi-line block list (`key:` then `- a` / `- b` on
+    /// following lines), with each item unquoted. Every line starting with `key:` is tried in
+    /// turn (a nested block such as `args` can repeat a key) until `parse` returns `Some`.
+    fn parse_list<T>(
+        yaml_str: &str,
+        key: &str,
+        parse: impl Fn(Vec<&str>) -> Option<T>,
+    ) -> Option<T> {
+        let prefix = format!("{key}:");
+        let lines: Vec<&str> = yaml_str.lines().collect();
+        lines.iter().enumerate().find_map(|(i, line)| {
+            let rest = line.trim_start().strip_prefix(&prefix)?.trim();
+            let items = if rest.is_empty() {
+                lines[i + 1..]
+                    .iter()
+                    .map(|line| line.trim())
+                    .filter(|t| !t.is_empty() && !t.starts_with('#'))
+                    .map_while(|t| t.strip_prefix('-'))
+                    .map(Self::unquote)
+                    .collect()
+            } else {
+                rest.trim_matches(|c| matches!(c, '[' | ']' | '(' | ')'))
+                    .split(',')
+                    .map(Self::unquote)
+                    .collect()
+            };
+            parse(items)
+        })
+    }
+
+    /// Parse the names block from YAML or Python dict format.
+    fn parse_names_block(yaml_str: &str) -> HashMap<usize, String> {
+        let mut names = HashMap::new();
+
+        // First, try to find `names: {0: 'person', 1: 'bicycle', ...}` Python dict format
+        // This is how Ultralytics stores names in ONNX metadata. Match the key at the
+        // start of a line: a plain substring search also hits keys that merely end in
+        // `names:`, so a pose export would read `kpt_names` as its class names.
+        if let Some(after_names) = yaml_str
+            .lines()
+            .find_map(|line| line.trim_start().strip_prefix("names:"))
+        {
+            let trimmed = after_names.trim();
+
+            // Check if it's Python dict format (starts with {)
+            if trimmed.starts_with('{')
+                && let Some(end) = trimmed.find('}')
+            {
+                let dict_str = &trimmed[1..end];
+                return Self::parse_python_dict(dict_str);
+            }
+        }
+
+        // Fall back to YAML block format
+        let lines: Vec<&str> = yaml_str.lines().collect();
+        let mut in_names_block = false;
+        let mut names_indent = 0;
+
+        for line in &lines {
+            let trimmed = line.trim();
+
+            if trimmed.starts_with("names:") {
+                in_names_block = true;
+                names_indent = line.len() - line.trim_start().len();
+                continue;
+            }
+
+            if in_names_block {
+                let current_indent = line.len() - line.trim_start().len();
+
+                // Check if we've exited the names block
+                if !trimmed.is_empty()
+                    && !trimmed.starts_with('#')
+                    && current_indent <= names_indent
+                {
+                    // Only exit if this isn't a class entry
+                    if !trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                        break;
+                    }
+                }
+
+                // Parse class entries like "0: person" or "  0: person"
+                Self::insert_class_entry(&mut names, trimmed);
+            }
+        }
+
+        names
+    }
+
+    /// Parse a Python dict string like `0: 'person', 1: 'bicycle'`.
+    fn parse_python_dict(dict_str: &str) -> HashMap<usize, String> {
+        let mut names = HashMap::new();
+
+        // Split by comma, but be careful with quotes
+        for entry in dict_str.split(',') {
+            let entry = entry.trim();
+            Self::insert_class_entry(&mut names, entry);
+        }
+
+        names
+    }
+
+    /// Get the number of classes in this model.
+    ///
+    /// # Returns
+    ///
+    /// * The count of classes.
+    #[must_use]
+    pub fn num_classes(&self) -> usize {
+        self.names.len()
+    }
+
+    /// Get a class name by ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `class_id` - The numeric identifier for the class.
+    ///
+    /// # Returns
+    ///
+    /// * `Some` class name if found, otherwise `None`.
+    #[must_use]
+    pub fn class_name(&self, class_id: usize) -> Option<&str> {
+        self.names.get(&class_id).map(String::as_str)
+    }
+
+    /// Whether the export uses the RT-DETR transformer decoder head.
+    ///
+    /// RT-DETR runs on a scale-filled input and emits normalized `[cx, cy, w, h, score, class]`
+    /// queries instead of the dense grid a YOLO detect head produces, so both ends of the
+    /// pipeline branch on this.
+    #[must_use]
+    pub fn is_rtdetr(&self) -> bool {
+        self.head == "RTDETRDecoder"
+    }
+
+    /// Whether the model was trained on stretched (scale-fill) input rather than letterboxed:
+    /// RT-DETR and depth, mirroring `scale_fill` on the Ultralytics predictors.
+    #[must_use]
+    pub fn scale_fill(&self) -> bool {
+        self.is_rtdetr() || self.task == Task::Depth
+    }
+
+    /// Input size recorded by the export, or the task default when it records none
+    /// ([`InferenceConfig::DEFAULT_OBB_IMGSZ`] for OBB, [`InferenceConfig::DEFAULT_IMGSZ`]
+    /// otherwise).
+    #[must_use]
+    pub fn imgsz_or_default(&self) -> (usize, usize) {
+        self.imgsz.unwrap_or(match self.task {
+            Task::Obb => InferenceConfig::DEFAULT_OBB_IMGSZ,
+            _ => InferenceConfig::DEFAULT_IMGSZ,
+        })
+    }
+
+    /// Extract the model name from the description.
+    ///
+    /// E.g. "Ultralytics `YOLO11n` model..." -> "`YOLO11n`"
+    /// Returns `YOLO` if extraction fails.
+    #[must_use]
+    pub fn model_name(&self) -> String {
+        // Description format: "Ultralytics <MODEL> model..."
+        self.description
+            .split_whitespace()
+            .find(|&word| {
+                let word = word.to_lowercase();
+                word.starts_with("yolo")
+                    || word.starts_with("rtdetr")
+                    || word.starts_with("rt-detr")
+            })
+            .unwrap_or("YOLO")
+            .to_string()
+    }
+}
+
+impl Default for ModelMetadata {
+    fn default() -> Self {
+        Self {
+            description: String::new(),
+            author: "Ultralytics".to_string(),
+            date: String::new(),
+            version: String::new(),
+            license: "AGPL-3.0".to_string(),
+            docs: "https://docs.ultralytics.com".to_string(),
+            task: Task::Detect,
+            head: String::new(),
+            stride: 32,
+            batch: 1,
+            imgsz: None,
+            channels: 3,
+            quantize: None,
+            names: Arc::new(HashMap::new()),
+            colors: Arc::default(),
+            end2end: false,
+            kpt_shape: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_METADATA: &str = r"
+description: Ultralytics YOLO11n model trained on /usr/src/ultralytics/ultralytics/cfg/datasets/coco.yaml
+author: Ultralytics
+date: '2025-12-11T20:19:45.464021'
+version: 8.3.236
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: person
+  1: bicycle
+  2: car
+  3: motorcycle
+channels: 3
+";
+
+    #[test]
+    fn test_parse_metadata() {
+        let metadata = ModelMetadata::from_yaml_str(SAMPLE_METADATA).unwrap();
+
+        assert_eq!(metadata.task, Task::Detect);
+        assert_eq!(metadata.stride, 32);
+        assert_eq!(metadata.batch, 1);
+        assert_eq!(metadata.imgsz, Some((640, 640)));
+        assert_eq!(metadata.channels, 3);
+        assert_eq!(metadata.num_classes(), 4);
+        assert_eq!(metadata.class_name(0), Some("person"));
+        assert_eq!(metadata.class_name(1), Some("bicycle"));
+        assert_eq!(metadata.class_name(2), Some("car"));
+        assert_eq!(metadata.class_name(3), Some("motorcycle"));
+    }
+
+    #[test]
+    fn test_parse_inline_imgsz() {
+        let yaml = "task: detect\nimgsz: [640, 640]\nstride: 32";
+        let metadata = ModelMetadata::from_yaml_str(yaml).unwrap();
+        assert_eq!(metadata.imgsz, Some((640, 640)));
+    }
+
+    #[test]
+    fn test_default_metadata() {
+        let metadata = ModelMetadata::default();
+        assert_eq!(metadata.task, Task::Detect);
+        assert_eq!(metadata.stride, 32);
+        assert_eq!(metadata.imgsz, None);
+    }
+
+    #[test]
+    fn test_parse_multiline_kpt_shape_and_imgsz() {
+        // Ultralytics `.tflite` metadata.yaml writes imgsz and kpt_shape as
+        // multi-line YAML block lists rather than inline `[a, b]`.
+        let yaml = "task: pose\nstride: 32\nimgsz:\n- 640\n- 640\nkpt_shape:\n- 17\n- 3\n";
+        let metadata = ModelMetadata::from_yaml_str(yaml).unwrap();
+        assert_eq!(metadata.task, Task::Pose);
+        assert_eq!(metadata.imgsz, Some((640, 640)));
+        assert_eq!(metadata.kpt_shape, Some((17, 3)));
+    }
+
+    #[test]
+    fn test_parse_inline_kpt_shape() {
+        let yaml = "task: pose\nkpt_shape: [17, 3]\nstride: 32";
+        let metadata = ModelMetadata::from_yaml_str(yaml).unwrap();
+        assert_eq!(metadata.kpt_shape, Some((17, 3)));
+    }
+
+    #[test]
+    fn test_parse_int_pair_inline_and_block() {
+        // Inline forms: `[a, b]`, `(a, b)`, `a, b`.
+        assert_eq!(
+            ModelMetadata::parse_int_pair("kpt_shape: [17, 3]", "kpt_shape"),
+            Some((17, 3))
+        );
+        assert_eq!(
+            ModelMetadata::parse_int_pair("kpt_shape: (17, 2)", "kpt_shape"),
+            Some((17, 2))
+        );
+        assert_eq!(
+            ModelMetadata::parse_int_pair("foo: 5, 6", "foo"),
+            Some((5, 6))
+        );
+        // Multi-line block list.
+        assert_eq!(
+            ModelMetadata::parse_int_pair("kpt_shape:\n- 17\n- 3", "kpt_shape"),
+            Some((17, 3))
+        );
+        // A single value, junk, or wrong key yields None.
+        assert_eq!(
+            ModelMetadata::parse_int_pair("kpt_shape: [17]", "kpt_shape"),
+            None
+        );
+        assert_eq!(ModelMetadata::parse_int_pair("foo: 5", "foo"), None);
+        assert_eq!(ModelMetadata::parse_int_pair("other: 1, 2", "foo"), None);
+    }
+
+    #[test]
+    fn test_python_dict_names() {
+        let yaml = "task: detect\nnames: {0: 'person', 1: 'bicycle', 2: 'car'}";
+        let m = ModelMetadata::from_yaml_str(yaml).unwrap();
+        assert_eq!(m.num_classes(), 3);
+        assert_eq!(m.class_name(1), Some("bicycle"));
+    }
+
+    #[test]
+    fn test_block_kpt_names_does_not_overwrite_names() {
+        let yaml = "task: pose\nnames:\n  0: person\nkpt_names:\n  0:\n  - nose\n  - left_eye";
+        let metadata = ModelMetadata::from_yaml_str(yaml).unwrap();
+        assert_eq!(metadata.names[&0], "person");
+    }
+
+    #[test]
+    fn test_kpt_names_does_not_shadow_names() {
+        // A pose export carries both keys, and the browser path joins ONNX metadata
+        // props in arbitrary order, so `kpt_names` can precede `names`.
+        let yaml = "task: pose\nkpt_names: {0: ['nose', 'left_eye']}\nnames: {0: 'person'}";
+        let m = ModelMetadata::from_yaml_str(yaml).unwrap();
+        assert_eq!(m.class_name(0), Some("person"));
+        assert_eq!(m.num_classes(), 1);
+    }
+
+    #[test]
+    fn test_parse_colors() {
+        // ONNX stores the Python repr inline; OpenVINO's metadata.yaml writes a block list.
+        let inline = "task: detect\ncolors: ['#042aff', '#FF0000']\nnames: {0: 'a', 1: 'b'}";
+        let block = "task: detect\ncolors:\n- '#042aff'\n- '#FF0000'\nnames:\n  0: a\n  1: b";
+        for yaml in [inline, block] {
+            let m = ModelMetadata::from_yaml_str(yaml).unwrap();
+            assert_eq!(*m.colors, [Color(4, 42, 255), Color(255, 0, 0)]);
+            assert_eq!(m.num_classes(), 2);
+        }
+        // One unreadable entry discards the list, so every class falls back to the palette.
+        let bad = ModelMetadata::from_yaml_str("colors: ['#042aff', 'red']").unwrap();
+        assert!(bad.colors.is_empty());
+    }
+
+    #[test]
+    fn test_precision_metadata_compatibility() {
+        let metadata = ModelMetadata::from_yaml_str("args: {'half': True}").unwrap();
+        assert_eq!(metadata.quantize, Some(Quantization::Fp16));
+
+        let metadata = ModelMetadata::from_yaml_str(
+            "quantize: 32\nhalf: true\nargs: {'quantize': 16, 'half': True}",
+        )
+        .unwrap();
+        assert_eq!(metadata.quantize, Some(Quantization::Fp32));
+    }
+
+    #[test]
+    fn test_tflite_style_metadata_text() {
+        // The `.tflite` reader rebuilds this text (unquoted `names:` block, inline
+        // lists) and hands it to `from_yaml_str`, exactly like the ONNX path.
+        let text = "task: detect\nimgsz: [640, 640]\nstride: 32\nend2end: false\nnames:\n  0: person\n  1: traffic light\n  2: men's shoe";
+        let m = ModelMetadata::from_yaml_str(text).unwrap();
+        assert_eq!(m.task, Task::Detect);
+        assert_eq!(m.imgsz, Some((640, 640)));
+        assert_eq!(m.num_classes(), 3);
+        // Names with a space and an apostrophe must survive (no escaping needed).
+        assert_eq!(m.class_name(1), Some("traffic light"));
+        assert_eq!(m.class_name(2), Some("men's shoe"));
+    }
+
+    #[test]
+    fn test_names_block_with_yaml_significant_chars() {
+        // The line parser splits on the first `:` and only treats a line as a
+        // comment when it *starts* with `#`, so class names containing `:` or `#`
+        // round-trip without escaping.
+        let text = "task: detect\nnames:\n  0: ratio 16:9\n  1: #1 pick";
+        let m = ModelMetadata::from_yaml_str(text).unwrap();
+        assert_eq!(m.class_name(0), Some("ratio 16:9"));
+        assert_eq!(m.class_name(1), Some("#1 pick"));
+    }
+
+    #[test]
+    fn test_pose_kpt_shape_and_quantize() {
+        let yaml = "task: pose\nkpt_shape: [17, 3]\nquantize: 16\nend2end: True";
+        let m = ModelMetadata::from_yaml_str(yaml).unwrap();
+        assert_eq!(m.task, Task::Pose);
+        assert_eq!(m.kpt_shape, Some((17, 3)));
+        assert_eq!(m.quantize, Some(Quantization::Fp16));
+        assert!(m.end2end);
+
+        // Quantize normally arrives embedded in the exporter args dictionary.
+        let yaml2 = "task: detect\nargs: {'quantize': 'w8a16', 'imgsz': 640}";
+        let m2 = ModelMetadata::from_yaml_str(yaml2).unwrap();
+        assert_eq!(m2.quantize, Some(Quantization::W8a16));
+
+        let yaml3 = "task: detect\nargs: {'quantize': None, 'imgsz': 640}";
+        let m3 = ModelMetadata::from_yaml_str(yaml3).unwrap();
+        assert_eq!(m3.quantize, None);
+    }
+
+    #[test]
+    fn test_invalid_fields_error() {
+        assert!(ModelMetadata::from_yaml_str("task: notarealtask").is_err());
+        assert!(ModelMetadata::from_yaml_str("task: detect\nstride: abc").is_err());
+        assert!(ModelMetadata::from_yaml_str("task: detect\nbatch: xyz").is_err());
+    }
+
+    #[test]
+    fn test_model_name_extraction() {
+        let m = ModelMetadata::from_yaml_str(SAMPLE_METADATA).unwrap();
+        assert_eq!(m.model_name(), "YOLO11n");
+        // Falls back to "YOLO" when the description has no yolo token.
+        let plain = ModelMetadata::default();
+        assert_eq!(plain.model_name(), "YOLO");
+    }
+
+    #[test]
+    fn test_rtdetr_head_detection() {
+        let yaml = "description: Ultralytics rt-detr-l model\ntask: detect\nhead: RTDETRDecoder";
+        let m = ModelMetadata::from_yaml_str(yaml).unwrap();
+        assert!(m.is_rtdetr());
+        assert_eq!(m.model_name(), "rt-detr-l");
+        // A YOLO detect head, and an export without the key, are both not RT-DETR.
+        let yolo = ModelMetadata::from_yaml_str("task: detect\nhead: Detect").unwrap();
+        assert!(!yolo.is_rtdetr());
+        assert!(!ModelMetadata::default().is_rtdetr());
+    }
+}

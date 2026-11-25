@@ -1,0 +1,235 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+[workspace]
+members = [".", "crates/web"]
+# The browser crate only builds for wasm32; keep it out of plain `cargo build`,
+# `cargo test`, etc. run from the workspace root (use `wasm-pack` or
+# `-p ultralytics-inference-web --target wasm32-unknown-unknown` for it).
+default-members = ["."]
+
+[package]
+name = "ultralytics-inference"
+version = "0.0.61"
+edition = "2024"
+rust-version = "1.92"
+authors = [
+    "Glenn Jocher <glenn.jocher@ultralytics.com>",
+    "Onuralp Sezer <onuralp@ultralytics.com>",
+]
+description = "Ultralytics YOLO inference library and CLI for Rust"
+license = "AGPL-3.0"
+repository = "https://github.com/ultralytics/inference"
+documentation = "https://docs.rs/ultralytics-inference"
+homepage = "https://www.ultralytics.com"
+readme = "README.md"
+keywords = ["yolo", "ultralytics", "inference", "computer-vision", "ml"]
+categories = ["computer-vision", "science", "command-line-interface"]
+include = [
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/LICENSE",
+    "/README.md",
+    "/src/**/*.rs",
+    "/tests/**/*.rs",
+    "/examples/**/*.rs",
+    "/examples/README.md",
+    "/docs/**/*.md",
+]
+
+# NOTE: do not use `all-features = true` here. It would enable `cuda-preprocess`,
+# which pulls in `cudarc` with `cuda-version-from-build-system`; that build script
+# shells out to `nvcc`, which docs.rs builders do not provide, failing the docs
+# build. The GPU features gate no public API in this crate (the cuda-preprocess
+# module is crate-private and `with_cuda_preprocess` is always compiled), so this
+# explicit set documents the entire public surface.
+[package.metadata.docs.rs]
+features = ["annotate", "visualize", "video", "track"]
+rustdoc-args = ["--cfg", "docsrs"]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+nursery = "warn"
+cargo = "warn"
+
+[lib]
+name = "ultralytics_inference"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ultralytics-inference"
+path = "src/main.rs"
+
+[[example]]
+name = "basic"
+
+[[example]]
+name = "config"
+
+[[example]]
+name = "tasks"
+
+[[example]]
+name = "annotate"
+required-features = ["annotate"]
+
+[[example]]
+name = "track"
+required-features = ["track", "video"]
+
+[dependencies]
+# Core - Image loading and processing. The default formats minus `avif`, which only
+# adds an AVIF encoder (rav1e) and is the slowest part of the build.
+image = { version = "^0.25", default-features = false, features = [
+    "bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp",
+] }
+# Base feature set is wasm-compatible; the `rayon` feature is added for native
+# targets only (see the `cfg(not(target_arch = "wasm32"))`
+fast_image_resize = { version = "^6.0", features = ["image"] }
+# SIMD for fast preprocessing
+wide = "^1.5"
+
+# LRU cache for preprocessing LUT
+lru = "^0.19"
+
+# Numerical computing (must match ort's ndarray version 0.17). The `rayon`
+# feature is native-only; see the target table below.
+ndarray = { version = "^0.17" }
+
+# Core - FP16 support (required by ort's half feature)
+half = { version = "^2.7", features = ["num-traits"] }
+bytemuck = "^1.25"
+
+cudarc = { version = "^0.19.8", optional = true, default-features = false, features = [
+    "driver",
+    "nvrtc",
+    "dynamic-loading",
+    "cuda-version-from-build-system",
+] }
+
+# Terminal-colored log output (pure Rust, builds on wasm)
+colored = "^3.1.1"
+
+# Optional - Visualization and Video support
+minifb = { version = "^0.29.0", optional = true }
+ffmpeg-next = { version = "^9.0", optional = true }
+
+# Optional - Image annotation (for --save feature)
+imageproc = { version = "^0.27", optional = true, default-features = false, features = ["text"] }
+ab_glyph = { version = "^0.2", optional = true }
+harfrust = { version = "^0.16", optional = true }
+unicode-bidi = { version = "^0.3", optional = true }
+
+# Native-only dependencies. None of these build for `wasm32-unknown-unknown`
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# ONNX Runtime 1.31.0
+ort = { version = "=2.0.0-rc.15", default-features = false, features = [
+    "std",
+    "ndarray",
+    "download-binaries",
+    "copy-dylibs",
+    "half",
+    "tls-native",
+    "num-complex",
+] }
+# JPEG 2000 (.jp2) decoding
+hayro-jpeg2000 = { version = "^0.5", default-features = false, features = ["image"] }
+# Native TLS, the backend ort-sys already downloads with; ureq's default rustls
+# pulls in `ring`, whose build needs clang on Windows on ARM.
+ureq = { version = "^3.3.0", default-features = false, features = ["native-tls", "gzip"] }
+dirs = "^7.0"
+# Glob sources such as `images/**/*.jpg`
+glob = "^0.3.3"
+rayon = "^1.12"
+clap = { version = "^4.6.1", features = ["derive"] }
+# rayon-backed parallelism for ndarray and fast_image_resize, native only.
+ndarray = { version = "^0.17", features = ["rayon"] }
+fast_image_resize = { version = "^6.0", features = ["image", "rayon"] }
+# Native OpenVINO IR (.xml) runtime, loaded from the installed libraries at run time (openvino-native feature).
+openvino = { version = "0.11.1", default-features = false, features = ["runtime-linking"], optional = true }
+
+[features]
+default = ["annotate", "visualize"]
+
+# Real-time visualization. Implies `annotate`: the viewer displays annotated frames,
+# so `annotate_image` must be available.
+visualize = ["minifb", "annotate"]
+
+# Video file support (requires ffmpeg installed on system)
+video = ["dep:ffmpeg-next"]
+
+# Multi-object tracking (the `track` CLI command and `Tracker`)
+track = []
+
+# Image annotation support (for --save feature in CLI)
+annotate = ["imageproc", "ab_glyph", "harfrust", "unicode-bidi"]
+
+# NVIDIA GPU acceleration
+cuda = ["ort/cuda"]
+# Also builds `cuda`, which runs what TensorRT cannot, such as the OCR recognizer
+tensorrt = ["cuda", "ort/tensorrt"]
+cuda-preprocess = ["cuda", "tensorrt", "dep:cudarc"]
+
+# AMD GPU acceleration
+rocm = ["ort/rocm"]
+
+# Intel acceleration (the downloaded ONNX Runtime includes the OpenVINO provider)
+openvino = ["ort/openvino"]
+# Native OpenVINO IR (.xml) models through the installed OpenVINO runtime, without ONNX Runtime
+openvino-native = ["dep:openvino"]
+onednn = ["ort/onednn"]
+
+# DirectML (Windows)
+directml = ["ort/directml"]
+
+# Mobile/Embedded
+nnapi = ["ort/nnapi"]   # Android
+coreml = ["ort/coreml"] # iOS/macOS
+qnn = ["ort/qnn"]       # Qualcomm
+
+# Additional accelerators
+xnnpack = ["ort/xnnpack"]
+acl = ["ort/acl"]           # ARM Compute Library
+tvm = ["ort/tvm"]           # Apache TVM
+migraphx = ["ort/migraphx"] # AMD MIGraphX
+rknpu = ["ort/rknpu"]       # Rockchip NPU
+cann = ["ort/cann"]         # Huawei CANN
+webgpu = ["ort/webgpu"]     # WebGPU
+azure = ["ort/azure"]       # Azure
+
+# Convenience feature groups
+nvidia = ["cuda", "tensorrt"]
+amd = ["rocm", "migraphx"]
+intel = ["openvino", "onednn"]
+mobile = ["nnapi", "coreml", "qnn"]
+all = ["annotate", "visualize", "video", "track"]
+
+[dev-dependencies]
+# Testing dependencies
+tempfile = "3"
+zip = { version = "^9.0", default-features = false, features = ["deflate-flate2"] }
+
+
+[profile.dev]
+opt-level = 0
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# Tests run in seconds, so unoptimized dependencies build about 2.5x faster at no real cost.
+[profile.test.package."*"]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

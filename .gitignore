@@ -1,6 +1,8 @@
 .venv
 images
 target
+.cargo-ok
+.cargo_vcs_info.json
 *.pt
 *.pth
 *.onnx

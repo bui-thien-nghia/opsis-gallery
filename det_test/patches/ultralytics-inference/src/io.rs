@@ -1,0 +1,794 @@
+// Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+//! I/O utilities for saving results including video encoding.
+
+#[cfg(feature = "video")]
+use ffmpeg_next as ffmpeg;
+
+use crate::error::{InferenceError, Result};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::SyncSender;
+use std::thread::JoinHandle;
+
+#[cfg(feature = "video")]
+use std::borrow::Cow;
+
+#[cfg(feature = "video")]
+use std::sync::Once;
+
+#[cfg(feature = "video")]
+static INIT: Once = Once::new();
+
+/// Initialize global video logging configuration.
+///
+/// Ensures `FFmpeg` is initialized and its logs are silenced (only errors are
+/// shown). Safe to call multiple times.
+#[allow(clippy::missing_const_for_fn)]
+pub fn init_logging() {
+    #[cfg(feature = "video")]
+    INIT.call_once(|| {
+        if let Err(e) = ffmpeg::init() {
+            eprintln!("Failed to initialize FFmpeg: {e}");
+        }
+
+        ffmpeg::log::set_level(ffmpeg::log::Level::Error);
+    });
+}
+
+/// Create `path` and all of its parent directories if they do not already exist.
+///
+/// This is a no-op when the directory is already present. On failure the
+/// underlying I/O error is wrapped with the offending path for context.
+///
+/// # Errors
+///
+/// Returns an error if the directory cannot be created.
+pub(crate) fn ensure_dir(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("Failed to create directory {}: {e}", path.display()),
+        )
+        .into()
+    })
+}
+
+/// Create `path` if needed and report whether a file can actually be written into it.
+///
+/// Probes with a real file, since permission bits miss ownership, ACLs and read-only mounts.
+/// Execution providers fail model loading on a cache path they cannot write, rather than skip it.
+///
+/// `create_new` never truncates and never follows a symlink, so a name clash leaves the existing
+/// file untouched and only the probe this call created is removed.
+#[cfg(any(feature = "openvino", feature = "tensorrt", feature = "coreml"))]
+pub(crate) fn is_writable_dir(path: &Path) -> bool {
+    if ensure_dir(path).is_err() {
+        return false;
+    }
+    let probe = crate::download::part_path(&path.join(".write-probe"));
+    if std::fs::File::options()
+        .create_new(true)
+        .write(true)
+        .open(&probe)
+        .is_err()
+    {
+        return false;
+    }
+    let _ = std::fs::remove_file(&probe);
+    true
+}
+
+/// Return the next available run directory, e.g. `runs/detect/predict`, then `predict2`, `predict3`, ...
+#[must_use]
+pub fn find_next_run_dir(base: &str, prefix: &str) -> String {
+    let base_path = Path::new(base);
+    let first = base_path.join(prefix);
+    if !first.exists() {
+        return first.to_string_lossy().into_owned();
+    }
+    for i in 2.. {
+        let numbered = base_path.join(format!("{prefix}{i}"));
+        if !numbered.exists() {
+            return numbered.to_string_lossy().into_owned();
+        }
+    }
+    first.to_string_lossy().into_owned()
+}
+
+/// Distance between key frames, in frames.
+#[cfg(feature = "video")]
+const KEY_FRAME_INTERVAL: u32 = 12;
+
+/// An H.264 encoder that writes annotated frames to a video file.
+#[cfg(feature = "video")]
+pub struct VideoWriter {
+    output: ffmpeg::format::context::Output,
+    encoder: ffmpeg::encoder::Video,
+    scaler: ffmpeg::software::scaling::context::Context,
+    /// Reused RGB24 staging frame; the scaler reads it before `write_frame` returns.
+    rgb: ffmpeg::util::frame::video::Video,
+    stream_index: usize,
+    encoder_time_base: ffmpeg::Rational,
+    /// Time base the muxer settled on while writing the header.
+    stream_time_base: ffmpeg::Rational,
+    frame_index: i64,
+    finished: bool,
+    width: usize,
+    height: usize,
+}
+
+#[cfg(feature = "video")]
+impl VideoWriter {
+    /// Create a new `VideoWriter`.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Output video path (e.g., "output.mp4").
+    /// * `width` - Video width.
+    /// * `height` - Video height.
+    /// * `fps` - Frames per second.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the encoder cannot be initialized.
+    pub fn new<P: AsRef<Path>>(path: P, width: usize, height: usize, fps: f32) -> Result<Self> {
+        let output_path = path.as_ref().to_path_buf();
+
+        if let Some(parent) = output_path.parent() {
+            ensure_dir(parent)?;
+        }
+
+        init_logging();
+
+        let frame_width = u32::try_from(width)
+            .map_err(|_| InferenceError::VideoError(format!("Invalid video width {width}")))?;
+        let frame_height = u32::try_from(height)
+            .map_err(|_| InferenceError::VideoError(format!("Invalid video height {height}")))?;
+
+        let mut output = ffmpeg::format::output(&output_path).map_err(|e| {
+            InferenceError::VideoError(format!(
+                "Failed to open {} for writing: {e}",
+                output_path.display()
+            ))
+        })?;
+
+        // Prefer libx264, which the `preset` option below belongs to, over whichever
+        // H.264 encoder the build happens to register first.
+        let codec = ffmpeg::encoder::find_by_name("libx264")
+            .or_else(|| ffmpeg::encoder::find(ffmpeg::codec::Id::H264))
+            .ok_or_else(|| {
+                InferenceError::VideoError("FFmpeg build has no H.264 encoder".to_string())
+            })?;
+
+        // Rational frame rate so fractional rates such as 29.97 stay exact.
+        let frame_rate = ffmpeg::Rational::from(f64::from(fps));
+        let encoder_time_base = frame_rate.invert();
+
+        let mut encoder = ffmpeg::codec::context::Context::new_with_codec(codec)
+            .encoder()
+            .video()
+            .map_err(|e| {
+                InferenceError::VideoError(format!("Failed to create video encoder: {e}"))
+            })?;
+
+        encoder.set_width(frame_width);
+        encoder.set_height(frame_height);
+        encoder.set_format(ffmpeg::format::Pixel::YUV420P);
+        encoder.set_time_base(encoder_time_base);
+        encoder.set_frame_rate(Some(frame_rate));
+        encoder.set_gop(KEY_FRAME_INTERVAL);
+        if output
+            .format()
+            .flags()
+            .contains(ffmpeg::format::Flags::GLOBAL_HEADER)
+        {
+            encoder.set_flags(ffmpeg::codec::Flags::GLOBAL_HEADER);
+        }
+
+        let mut options = ffmpeg::Dictionary::new();
+        options.set("preset", "medium");
+        let encoder = encoder.open_with(options).map_err(|e| {
+            InferenceError::VideoError(format!("Failed to open H.264 encoder: {e}"))
+        })?;
+
+        let mut stream = output
+            .add_stream(codec)
+            .map_err(|e| InferenceError::VideoError(format!("Failed to add video stream: {e}")))?;
+        stream.set_parameters(&encoder);
+        stream.set_time_base(encoder_time_base);
+        let stream_index = stream.index();
+
+        output.write_header().map_err(|e| {
+            InferenceError::VideoError(format!("Failed to write video header: {e}"))
+        })?;
+
+        let stream_time_base = output
+            .stream(stream_index)
+            .map_or(encoder_time_base, |s| s.time_base());
+
+        let scaler = ffmpeg::software::scaling::context::Context::get(
+            ffmpeg::format::Pixel::RGB24,
+            frame_width,
+            frame_height,
+            ffmpeg::format::Pixel::YUV420P,
+            frame_width,
+            frame_height,
+            ffmpeg::software::scaling::flag::Flags::BILINEAR,
+        )
+        .map_err(|e| InferenceError::VideoError(format!("Scaler init: {e}")))?;
+
+        let rgb = ffmpeg::util::frame::video::Video::new(
+            ffmpeg::format::Pixel::RGB24,
+            frame_width,
+            frame_height,
+        );
+
+        Ok(Self {
+            output,
+            encoder,
+            scaler,
+            rgb,
+            stream_index,
+            encoder_time_base,
+            stream_time_base,
+            frame_index: 0,
+            finished: false,
+            width,
+            height,
+        })
+    }
+
+    /// Write a frame to the video.
+    ///
+    /// # Arguments
+    ///
+    /// * `frame` - Input frame as `DynamicImage`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if encoding fails or frame dimensions don't match.
+    pub fn write_frame(&mut self, frame: &image::DynamicImage) -> Result<()> {
+        // Annotated frames are already RGB8, so borrow them rather than converting.
+        let img_buffer = frame
+            .as_rgb8()
+            .map_or_else(|| Cow::Owned(frame.to_rgb8()), Cow::Borrowed);
+        let width = img_buffer.width() as usize;
+        let height = img_buffer.height() as usize;
+
+        if width != self.width || height != self.height {
+            return Err(InferenceError::VideoError(format!(
+                "Frame dimensions {}x{} do not match video dimensions {}x{}",
+                width, height, self.width, self.height
+            )));
+        }
+
+        // Copy into the staging frame row by row: its stride may be wider than width * 3.
+        let stride = self.rgb.stride(0);
+        let row_bytes = width * 3;
+        let data = self.rgb.data_mut(0);
+        for (y, row) in img_buffer.as_raw().chunks_exact(row_bytes).enumerate() {
+            data[y * stride..y * stride + row_bytes].copy_from_slice(row);
+        }
+
+        // The encoder keeps a reference to every frame it is given, so this one is fresh.
+        let mut yuv = ffmpeg::util::frame::video::Video::empty();
+        self.scaler
+            .run(&self.rgb, &mut yuv)
+            .map_err(|e| InferenceError::VideoError(format!("Failed to convert frame: {e}")))?;
+        yuv.set_pts(Some(self.frame_index));
+        self.frame_index += 1;
+
+        self.encoder
+            .send_frame(&yuv)
+            .map_err(|e| InferenceError::VideoError(format!("Failed to encode frame: {e}")))?;
+
+        self.write_packets()
+    }
+
+    /// Interleave every packet the encoder has ready into the container.
+    fn write_packets(&mut self) -> Result<()> {
+        let mut packet = ffmpeg::codec::packet::Packet::empty();
+        loop {
+            match self.encoder.receive_packet(&mut packet) {
+                Ok(()) => {}
+                // The encoder wants more frames, or has been drained after end of stream.
+                Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => {
+                    break;
+                }
+                Err(ffmpeg::Error::Eof) => break,
+                Err(e) => {
+                    return Err(InferenceError::VideoError(format!(
+                        "Failed to receive encoded packet: {e}"
+                    )));
+                }
+            }
+
+            packet.set_stream(self.stream_index);
+            // One frame lasts exactly one tick of the encoder time base.
+            packet.set_duration(1);
+            packet.rescale_ts(self.encoder_time_base, self.stream_time_base);
+            packet.write_interleaved(&mut self.output).map_err(|e| {
+                InferenceError::VideoError(format!("Failed to write video packet: {e}"))
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Flush the encoder and write the container trailer.
+    fn finalize(&mut self) -> Result<()> {
+        if self.finished {
+            return Ok(());
+        }
+        self.finished = true;
+
+        self.encoder
+            .send_eof()
+            .map_err(|e| InferenceError::VideoError(format!("Failed to flush encoder: {e}")))?;
+        self.write_packets()?;
+        self.output.write_trailer().map_err(|e| {
+            InferenceError::VideoError(format!("Failed to finish video encoding: {e}"))
+        })
+    }
+
+    /// Finish writing the video.
+    ///
+    /// Calling this explicitly is optional as `drop` will also clean up,
+    /// but this allows catching errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the encoder fails to finish.
+    pub fn finish(mut self) -> Result<()> {
+        self.finalize()
+    }
+}
+
+#[cfg(feature = "video")]
+impl Drop for VideoWriter {
+    fn drop(&mut self) {
+        if let Err(e) = self.finalize() {
+            eprintln!("{e}");
+        }
+    }
+}
+
+/// One queue and worker thread that writes images off the calling thread.
+type ImageWorker = (
+    SyncSender<(PathBuf, image::DynamicImage)>,
+    JoinHandle<Result<()>>,
+);
+
+/// Close a worker's queue and wait for it to drain, returning its first failure, or
+/// `panicked` if the thread panicked.
+fn join_worker<T>(
+    (sender, worker): (SyncSender<T>, JoinHandle<Result<()>>),
+    panicked: InferenceError,
+) -> Result<()> {
+    drop(sender);
+    worker.join().unwrap_or(Err(panicked))
+}
+
+/// Worker threads encoding images, enough to keep up with inference on large frames.
+const IMAGE_WRITER_THREADS: usize = 3;
+
+/// Helper struct to handle saving inference results to video or disk.
+///
+/// This consolidates logic for deciding whether to save as a video file
+/// or individual frames, and manages the `VideoWriter` state.
+pub struct SaveResults {
+    save_dir: PathBuf,
+    /// Encodes and writes images on worker threads so JPEG encoding overlaps inference.
+    image_writer: Vec<ImageWorker>,
+    #[cfg(feature = "video")]
+    save_frames: bool,
+    /// Encodes video frames on a worker thread so video encoding overlaps inference.
+    #[cfg(feature = "video")]
+    video_writer: Option<(SyncSender<image::DynamicImage>, JoinHandle<Result<()>>)>,
+}
+
+impl SaveResults {
+    /// Create a new `SaveResults`.
+    ///
+    /// # Arguments
+    ///
+    /// * `save_dir` - Directory to save results.
+    /// * `save_frames` - If true, force saving individual frames even for video sources.
+    #[must_use]
+    #[cfg_attr(not(feature = "video"), allow(unused_variables))]
+    pub fn new(save_dir: PathBuf, save_frames: bool) -> Self {
+        init_logging();
+
+        Self {
+            save_dir,
+            image_writer: Vec::new(),
+            #[cfg(feature = "video")]
+            save_frames,
+            #[cfg(feature = "video")]
+            video_writer: None,
+        }
+    }
+
+    /// Save an annotated frame.
+    ///
+    /// Decides automatically whether to append to a video or save as an image file
+    /// based on the source type and configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `is_video` - Whether the source is a video/stream.
+    /// * `meta` - Source metadata (path, frame index, fps).
+    /// * `annotated` - The annotated image to save.
+    ///
+    /// # Errors
+    ///
+    /// Writing is queued, so a failed image or video write is reported by [`Self::finish`].
+    /// This returns an error only if the output directory cannot be created or the writer
+    /// has already stopped.
+    pub fn save(
+        &mut self,
+        is_video: bool,
+        meta: &crate::source::SourceMeta,
+        annotated: &image::DynamicImage,
+    ) -> Result<()> {
+        self.save_owned(is_video, meta, annotated.clone())
+    }
+
+    /// Like [`Self::save`], but takes the image by value so queuing it does not copy the pixels.
+    ///
+    /// # Errors
+    ///
+    /// Writing is queued, so a failed image or video write is reported by [`Self::finish`].
+    /// This returns an error only if the output directory cannot be created or the writer
+    /// has already stopped.
+    pub fn save_owned(
+        &mut self,
+        is_video: bool,
+        meta: &crate::source::SourceMeta,
+        annotated: image::DynamicImage,
+    ) -> Result<()> {
+        #[cfg(feature = "video")]
+        let save_as_video = is_video && !self.save_frames;
+        #[cfg(not(feature = "video"))]
+        let save_as_video = false;
+
+        if save_as_video {
+            #[cfg(feature = "video")]
+            {
+                if self.video_writer.is_none() {
+                    let filename = Path::new(&meta.path)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+
+                    let output_name = Path::new(filename.as_ref())
+                        .with_extension("mp4")
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+
+                    let save_path = self.save_dir.join(output_name);
+                    let width = annotated.width() as usize;
+                    let height = annotated.height() as usize;
+                    let fps = meta.fps.unwrap_or(30.0);
+
+                    let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+                    // The encoder is not `Send`, so it is built on the worker thread.
+                    let worker = std::thread::spawn(move || {
+                        let mut writer = VideoWriter::new(save_path, width, height, fps)?;
+                        for frame in receiver {
+                            writer.write_frame(&frame)?;
+                        }
+                        writer.finish()
+                    });
+                    self.video_writer = Some((sender, worker));
+                }
+
+                if let Some((sender, _)) = &self.video_writer {
+                    sender
+                        .send(annotated)
+                        .map_err(|e| InferenceError::VideoError(e.to_string()))?;
+                }
+            }
+        } else {
+            let (save_dir, filename) = if is_video {
+                // For video sources, create a subfolder: {video_name}_frames/
+                let video_stem = Path::new(&meta.path)
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy();
+                let frames_dir = self.save_dir.join(format!("{video_stem}_frames"));
+                let frame_num = meta.frame_idx + 1;
+                let filename = format!("{video_stem}_{frame_num}.jpg");
+                (frames_dir, filename.into())
+            } else {
+                let mut filename = Path::new(&meta.path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_os_string();
+                // Formats we can read but not write are saved as JPEG, e.g. photo.jp2.jpg.
+                if !image::ImageFormat::from_path(&filename).is_ok_and(|f| f.writing_enabled()) {
+                    filename.push(".jpg");
+                }
+                (self.save_dir.clone(), filename)
+            };
+
+            let save_path = save_dir.join(filename);
+
+            ensure_dir(&save_dir)?;
+
+            if self.image_writer.is_empty() {
+                self.image_writer = (0..IMAGE_WRITER_THREADS)
+                    .map(|_| {
+                        let (sender, receiver) =
+                            std::sync::mpsc::sync_channel::<(PathBuf, image::DynamicImage)>(2);
+                        let worker = std::thread::spawn(move || {
+                            let mut result = Ok(());
+                            for (path, image) in receiver {
+                                let saved = image.save(&path).map_err(|e| {
+                                    InferenceError::ImageError(format!("{}: {e}", path.display()))
+                                });
+                                if result.is_ok() {
+                                    result = saved;
+                                }
+                            }
+                            result
+                        });
+                        (sender, worker)
+                    })
+                    .collect();
+            }
+            // The same path always goes to the same worker, so writes to one file stay in order.
+            let mut hasher = std::hash::DefaultHasher::new();
+            std::hash::Hash::hash(&save_path, &mut hasher);
+            let slot = std::hash::Hasher::finish(&hasher) % self.image_writer.len() as u64;
+            let worker = usize::try_from(slot).unwrap_or(0);
+            self.image_writer[worker]
+                .0
+                .send((save_path, annotated))
+                .map_err(|e| InferenceError::ImageError(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Wait for every queued image and video frame to be written, returning the first failure.
+    fn join_writers(&mut self) -> Result<()> {
+        let mut result = Ok(());
+        for worker in std::mem::take(&mut self.image_writer) {
+            let joined = join_worker(
+                worker,
+                InferenceError::ImageError("image writer thread panicked".into()),
+            );
+            if result.is_ok() {
+                result = joined;
+            }
+        }
+        #[cfg(feature = "video")]
+        if let Some(worker) = self.video_writer.take() {
+            let joined = join_worker(
+                worker,
+                InferenceError::VideoError("video writer thread panicked".into()),
+            );
+            if result.is_ok() {
+                result = joined;
+            }
+        }
+        result
+    }
+
+    /// Wait for queued images to be written and finish any active video writing.
+    ///
+    /// Dropping the saver also waits for queued writes, but only this reports failures.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a queued image could not be written or the video writer fails to finish.
+    pub fn finish(mut self) -> Result<()> {
+        self.join_writers()
+    }
+}
+
+impl Drop for SaveResults {
+    fn drop(&mut self) {
+        let _ = self.join_writers();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::source::SourceMeta;
+
+    /// Truncation safety itself is guaranteed by `create_new`; what is asserted here is the
+    /// observable contract the execution providers rely on, including the read-only case that
+    /// otherwise turns into a model load failure.
+    #[cfg(any(feature = "openvino", feature = "tensorrt", feature = "coreml"))]
+    #[test]
+    fn test_is_writable_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("cache");
+
+        // Creates the directory, reports writable, and leaves no probe behind.
+        assert!(is_writable_dir(&dir));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+
+        // Existing contents survive untouched.
+        let existing = dir.join("model.blob");
+        std::fs::write(&existing, b"precious").unwrap();
+        assert!(is_writable_dir(&dir));
+        assert_eq!(std::fs::read(&existing).unwrap(), b"precious");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+
+        // An existing but read-only directory reports false rather than being handed to a provider.
+        // Root ignores the permission bits, so that case cannot be observed when the suite runs
+        // as root, as it does in the FFmpeg container job; probe for it and skip instead.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let probe = dir.join(".permission-probe");
+            let permissions_enforced = std::fs::File::create(&probe).is_err();
+            let _ = std::fs::remove_file(&probe);
+            if permissions_enforced {
+                assert!(!is_writable_dir(&dir));
+            }
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_ensure_dir_creates_nested() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("a").join("b").join("c");
+        assert!(!nested.exists());
+        ensure_dir(&nested).unwrap();
+        assert!(nested.exists());
+        // Idempotent: a second call on an existing dir is a no-op success.
+        ensure_dir(&nested).unwrap();
+        assert!(nested.exists());
+    }
+
+    #[test]
+    fn test_find_next_run_dir_numbering() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().to_string_lossy().into_owned();
+
+        // First call returns the un-suffixed prefix when nothing exists yet.
+        let first = find_next_run_dir(&base, "predict");
+        assert!(first.ends_with("predict"));
+
+        // Once `predict` exists, the next is `predict2`, then `predict3`, ...
+        std::fs::create_dir_all(&first).unwrap();
+        let second = find_next_run_dir(&base, "predict");
+        assert!(second.ends_with("predict2"));
+
+        std::fs::create_dir_all(&second).unwrap();
+        let third = find_next_run_dir(&base, "predict");
+        assert!(third.ends_with("predict3"));
+    }
+
+    #[test]
+    fn test_init_logging_is_idempotent() {
+        // Safe to call multiple times.
+        init_logging();
+        init_logging();
+    }
+
+    #[test]
+    fn test_save_results_writes_image() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut saver = SaveResults::new(tmp.path().to_path_buf(), false);
+
+        let img = image::DynamicImage::new_rgb8(8, 8);
+        for path in ["frame.jpg", "frame.jp2"] {
+            let meta = SourceMeta {
+                path: path.to_string(),
+                ..SourceMeta::default()
+            };
+            saver.save(false, &meta, &img).unwrap();
+        }
+        saver.finish().unwrap();
+        assert!(tmp.path().join("frame.jpg").exists());
+        // .jp2 has no encoder, so it is saved as JPEG without overwriting frame.jpg.
+        assert!(tmp.path().join("frame.jp2.jpg").exists());
+    }
+
+    #[test]
+    fn test_save_results_drop_waits_for_queued_images() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut saver = SaveResults::new(tmp.path().to_path_buf(), false);
+        let meta = SourceMeta {
+            path: "frame.jpg".to_string(),
+            ..SourceMeta::default()
+        };
+
+        saver
+            .save(false, &meta, &image::DynamicImage::new_rgb8(8, 8))
+            .unwrap();
+        drop(saver);
+        assert!(tmp.path().join("frame.jpg").exists());
+    }
+
+    #[test]
+    fn test_save_results_reports_failed_image_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A directory where the image should go makes the write fail.
+        std::fs::create_dir(tmp.path().join("frame.jpg")).unwrap();
+        let mut saver = SaveResults::new(tmp.path().to_path_buf(), false);
+        let meta = SourceMeta {
+            path: "frame.jpg".to_string(),
+            ..SourceMeta::default()
+        };
+
+        saver
+            .save(false, &meta, &image::DynamicImage::new_rgb8(8, 8))
+            .unwrap();
+        assert!(saver.finish().is_err());
+    }
+
+    #[cfg(feature = "video")]
+    #[test]
+    fn test_video_writer_roundtrip() {
+        // Encode a few frames to a real mp4 and confirm a non-empty file is produced.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("out.mp4");
+        let mut writer = VideoWriter::new(&path, 32, 32, 10.0).unwrap();
+        for _ in 0..3 {
+            writer
+                .write_frame(&image::DynamicImage::new_rgb8(32, 32))
+                .unwrap();
+        }
+        // Mismatched frame size is rejected.
+        assert!(
+            writer
+                .write_frame(&image::DynamicImage::new_rgb8(16, 16))
+                .is_err()
+        );
+        writer.finish().unwrap();
+
+        assert!(path.exists());
+        assert!(std::fs::metadata(&path).unwrap().len() > 0);
+    }
+
+    #[cfg(feature = "video")]
+    #[test]
+    fn test_save_results_video_source_writes_frame_image_when_save_frames() {
+        // With save_frames=true a video source still goes down the image path,
+        // landing under a `{stem}_frames/` subdirectory.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut saver = SaveResults::new(tmp.path().to_path_buf(), true);
+
+        let img = image::DynamicImage::new_rgb8(8, 8);
+        let meta = SourceMeta {
+            frame_idx: 0,
+            path: "clip.mp4".to_string(),
+            ..SourceMeta::default()
+        };
+
+        saver.save(true, &meta, &img).unwrap();
+        saver.finish().unwrap();
+        assert!(tmp.path().join("clip_frames").join("clip_1.jpg").exists());
+    }
+
+    #[cfg(feature = "video")]
+    #[test]
+    fn test_save_results_video_branch_writes_mp4() {
+        // Video source with save_frames=false routes through the VideoWriter and
+        // produces a single .mp4 named after the source.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut saver = SaveResults::new(tmp.path().to_path_buf(), false);
+        let img = image::DynamicImage::new_rgb8(32, 32);
+        let meta = SourceMeta {
+            frame_idx: 0,
+            path: "movie.mp4".to_string(),
+            fps: Some(10.0),
+            ..SourceMeta::default()
+        };
+        saver.save(true, &meta, &img).unwrap();
+        saver.save(true, &meta, &img).unwrap();
+        saver.finish().unwrap();
+        assert!(tmp.path().join("movie.mp4").exists());
+    }
+}

@@ -1,0 +1,199 @@
+// Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+//! Task definitions for YOLO models.
+//!
+//! This module defines the different tasks that YOLO models can perform,
+//! along with their associated capabilities and string representations.
+
+use std::fmt;
+use std::str::FromStr;
+
+/// YOLO model task types.
+///
+/// Each task type corresponds to a different computer vision problem
+/// that YOLO models can solve. The task type determines the expected
+/// model outputs and post-processing steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Task {
+    /// Object detection.
+    /// Predicts bounding boxes and class labels for objects in an image.
+    #[default]
+    Detect,
+    /// Instance segmentation.
+    /// Predicts bounding boxes, class labels, and pixel-level masks for objects.
+    Segment,
+    /// Semantic segmentation.
+    /// Assigns a class label to every pixel in the image.
+    Semantic,
+    /// Monocular depth estimation.
+    /// Predicts a per-pixel depth map (in meters) for the whole image.
+    Depth,
+    /// Image classification.
+    /// Predicts class probabilities for the entire image (no localization).
+    Classify,
+    /// Pose estimation.
+    /// Predicts bounding boxes and skeletal keypoints for objects (e.g., humans).
+    Pose,
+    /// Oriented bounding box detection (OBB).
+    /// Predicts rotated bounding boxes for objects, useful for aerial imagery etc.
+    Obb,
+}
+
+impl Task {
+    /// Get the string representation used in ONNX model metadata
+    /// (e.g. `"detect"`, `"segment"`).
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Detect => "detect",
+            Self::Segment => "segment",
+            Self::Semantic => "semantic",
+            Self::Depth => "depth",
+            Self::Classify => "classify",
+            Self::Pose => "pose",
+            Self::Obb => "obb",
+        }
+    }
+
+    /// ONNX filename suffix for this task, used to construct `{family}n{suffix}.onnx`
+    /// (e.g. `yolo26n-seg.onnx`, `yolo11n-pose.onnx`, `yolov8n.onnx`).
+    ///
+    /// ```
+    /// use ultralytics_inference::Task;
+    /// assert_eq!(Task::Detect.model_suffix(), "");
+    /// assert_eq!(Task::Segment.model_suffix(), "-seg");
+    /// ```
+    #[must_use]
+    pub const fn model_suffix(&self) -> &'static str {
+        match self {
+            Self::Detect => "",
+            Self::Segment => "-seg",
+            Self::Semantic => "-sem",
+            Self::Depth => "-depth",
+            Self::Classify => "-cls",
+            Self::Pose => "-pose",
+            Self::Obb => "-obb",
+        }
+    }
+
+    /// Default nano `YOLO26` model filename for this task.
+    ///
+    /// Used by the CLI to auto-pick a model when `--model` is omitted but `--task` is set.
+    /// `YOLO26`, `YOLO11`, and `YOLOv8` variants are all auto-downloadable.
+    ///
+    /// ```
+    /// use ultralytics_inference::Task;
+    /// assert_eq!(Task::Detect.default_model(), "yolo26n.onnx");
+    /// assert_eq!(Task::Segment.default_model(), "yolo26n-seg.onnx");
+    /// ```
+    #[must_use]
+    pub fn default_model(&self) -> String {
+        format!("yolo26n{}.onnx", self.model_suffix())
+    }
+
+    /// Whether the task predicts boxes (detect, segment, pose and OBB), which can be tracked.
+    #[must_use]
+    pub const fn has_boxes(&self) -> bool {
+        matches!(self, Self::Detect | Self::Segment | Self::Pose | Self::Obb)
+    }
+}
+
+impl fmt::Display for Task {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Task {
+    type Err = TaskParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "detect" | "detection" => Ok(Self::Detect),
+            "segment" | "segmentation" => Ok(Self::Segment),
+            "semantic" | "semantic_segmentation" | "semseg" => Ok(Self::Semantic),
+            "depth" | "depth_estimation" => Ok(Self::Depth),
+            "classify" | "classification" | "cls" => Ok(Self::Classify),
+            "pose" | "keypoint" | "keypoints" => Ok(Self::Pose),
+            "obb" | "oriented" => Ok(Self::Obb),
+            _ => Err(TaskParseError(s.to_string())),
+        }
+    }
+}
+
+/// Error returned when parsing an invalid task string.
+#[derive(Debug, Clone)]
+pub struct TaskParseError(String);
+
+impl fmt::Display for TaskParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid task '{}', expected one of: detect, segment, semantic, depth, classify, pose, obb",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for TaskParseError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_task_from_str() {
+        assert_eq!("detect".parse::<Task>().unwrap(), Task::Detect);
+        assert_eq!("segment".parse::<Task>().unwrap(), Task::Segment);
+        assert_eq!("semantic".parse::<Task>().unwrap(), Task::Semantic);
+        assert_eq!("depth".parse::<Task>().unwrap(), Task::Depth);
+        assert_eq!("classify".parse::<Task>().unwrap(), Task::Classify);
+        assert_eq!("pose".parse::<Task>().unwrap(), Task::Pose);
+        assert_eq!("obb".parse::<Task>().unwrap(), Task::Obb);
+
+        // Alternative names
+        assert_eq!("detection".parse::<Task>().unwrap(), Task::Detect);
+        assert_eq!("segmentation".parse::<Task>().unwrap(), Task::Segment);
+        assert_eq!(
+            "semantic_segmentation".parse::<Task>().unwrap(),
+            Task::Semantic
+        );
+        assert_eq!("depth_estimation".parse::<Task>().unwrap(), Task::Depth);
+        assert_eq!("cls".parse::<Task>().unwrap(), Task::Classify);
+        assert_eq!("keypoints".parse::<Task>().unwrap(), Task::Pose);
+    }
+
+    #[test]
+    fn test_task_display() {
+        assert_eq!(Task::Detect.to_string(), "detect");
+        assert_eq!(Task::Segment.to_string(), "segment");
+        assert_eq!(Task::Semantic.to_string(), "semantic");
+    }
+
+    #[test]
+    fn test_task_suffix_and_default_model() {
+        let cases = [
+            (Task::Detect, "detect", "", "yolo26n.onnx"),
+            (Task::Segment, "segment", "-seg", "yolo26n-seg.onnx"),
+            (Task::Semantic, "semantic", "-sem", "yolo26n-sem.onnx"),
+            (Task::Depth, "depth", "-depth", "yolo26n-depth.onnx"),
+            (Task::Classify, "classify", "-cls", "yolo26n-cls.onnx"),
+            (Task::Pose, "pose", "-pose", "yolo26n-pose.onnx"),
+            (Task::Obb, "obb", "-obb", "yolo26n-obb.onnx"),
+        ];
+        for (task, name, suffix, model) in cases {
+            assert_eq!(task.as_str(), name);
+            assert_eq!(task.model_suffix(), suffix);
+            assert_eq!(task.default_model(), model);
+        }
+    }
+
+    #[test]
+    fn test_task_from_str_aliases_and_errors() {
+        assert_eq!("semseg".parse::<Task>().unwrap(), Task::Semantic);
+        assert_eq!("Classification".parse::<Task>().unwrap(), Task::Classify);
+        assert_eq!("KEYPOINT".parse::<Task>().unwrap(), Task::Pose);
+        assert_eq!("oriented".parse::<Task>().unwrap(), Task::Obb);
+        assert!("not_a_task".parse::<Task>().is_err());
+    }
+}
