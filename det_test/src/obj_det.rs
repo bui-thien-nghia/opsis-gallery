@@ -10,12 +10,13 @@ pub struct YoloPreparedInput<'a> {
     pub resize_scale: f32,
 }
 
-pub struct YoloDetector {
+pub struct ObjDetector {
     model: YOLOModel,
 }
 
-impl YoloDetector {
+impl ObjDetector {
     pub fn new(model_path: &Path, conf_threshold: f32) -> Result<Self> {
+        ultralytics_inference::logging::set_verbose(false);
         let config = InferenceConfig::new()
             .with_confidence(conf_threshold)
             .with_iou(0.7);
@@ -70,3 +71,4 @@ impl YoloDetector {
         Ok(detections)
     }
 }
+ 

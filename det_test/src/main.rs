@@ -6,7 +6,7 @@ mod search;
 mod storage;
 mod types;
 
-use crate::obj_det::YoloDetector;
+use crate::obj_det::ObjDetector;
 use crate::ocr::OcrPipeline;
 use crate::preprocess::{adaptive_resize, load_image};
 use crate::profiler::{StageTimer, SystemSampler, compute_stats, measure_record_storage};
@@ -15,14 +15,14 @@ use crate::storage::{SqliteStore, save_records_json};
 use crate::types::{ImageRecord, StageRuntimes};
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use oar_ocr::core::OrtGlobalThreadPoolOptions;
+use oar_ocr::core::inference::set_ort_environment;
 use std::collections::HashMap;
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 const MAX_DIM: u32 = 1600;
-const YOLO_CONF_THRESHOLD: f32 = 0.2;
+const YOLO_CONF_THRESHOLD: f32 = 0.5;
 const OCR_CONF_THRESHOLD: f32 = 0.5;
 
 fn collect_image_paths(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -66,13 +66,13 @@ fn main() -> Result<()> {
         anyhow::anyhow!("Failed to share ONNX Runtime environment with Ultralytics: {e:?}")
     })?;
 
-    let mut yolo = YoloDetector::new(
-        Path::new("models/obj_det/yolo11n-320-int8.onnx"),
+    let mut yolo = ObjDetector::new(
+        Path::new("models/obj_det/yolo11n-320-fp16.onnx"),
         YOLO_CONF_THRESHOLD,
     )?;
     let ocr = OcrPipeline::new(
-        Path::new("models/ocr/ppocrv5-det-mobile.onnx"),
-        Path::new("models/ocr/ppocrv5-rec-mobile.onnx"),
+        Path::new("models/ocr/ppocrv6-det-s.onnx"),
+        Path::new("models/ocr/ppocrv6-rec-s.onnx"),
         Path::new("models/ocr/ppocrv6-keys.txt"),
         OCR_CONF_THRESHOLD,
     )?;
