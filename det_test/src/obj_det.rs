@@ -21,10 +21,7 @@ impl ObjDetector {
             .with_confidence(conf_threshold)
             .with_iou(0.7);
         let model = YOLOModel::load_with_config(model_path, config).with_context(|| {
-            format!(
-                "Failed to load Ultralytics model: {}",
-                model_path.display()
-            )
+            format!("Failed to load Ultralytics model: {}", model_path.display())
         })?;
 
         Ok(Self { model })
@@ -71,4 +68,3 @@ impl ObjDetector {
         Ok(detections)
     }
 }
- 

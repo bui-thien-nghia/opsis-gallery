@@ -22,8 +22,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
 const MAX_DIM: u32 = 1600;
-const YOLO_CONF_THRESHOLD: f32 = 0.5;
-const OCR_CONF_THRESHOLD: f32 = 0.5;
+const YOLO_CONF_THRESHOLD: f32 = 0.3;
+const OCR_CONF_THRESHOLD: f32 = 0.3;
 
 fn collect_image_paths(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();

@@ -6,7 +6,15 @@ pub fn load_image(path: &Path) -> Result<DynamicImage> {
     if !path.exists() {
         bail!("Image file does not exist: {}", path.display());
     }
-    image::open(path).with_context(|| format!("Failed to decode image: {}", path.display()))
+
+    let reader = image::ImageReader::open(path)
+        .with_context(|| format!("Failed to open image: {}", path.display()))?
+        .with_guessed_format()
+        .with_context(|| format!("Failed to detect image format: {}", path.display()))?;
+
+    reader
+        .decode()
+        .with_context(|| format!("Failed to decode image: {}", path.display()))
 }
 
 pub fn adaptive_resize(img: DynamicImage, max_dim: u32) -> (DynamicImage, f32) {
