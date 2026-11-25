@@ -57,7 +57,10 @@ mod tests {
 
     #[test]
     fn rescale_helpers_invert_resize_scale() {
-        assert_eq!(rescale_xyxy([10.0, 20.0, 30.0, 40.0], 0.5), [20.0, 40.0, 60.0, 80.0]);
+        assert_eq!(
+            rescale_xyxy([10.0, 20.0, 30.0, 40.0], 0.5),
+            [20.0, 40.0, 60.0, 80.0]
+        );
         assert_eq!(
             rescale_quad([[5.0, 10.0], [15.0, 10.0], [15.0, 20.0], [5.0, 20.0]], 0.5),
             [[10, 20], [30, 20], [30, 40], [10, 40]]

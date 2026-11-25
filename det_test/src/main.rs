@@ -1,4 +1,4 @@
-mod obj_ultralytics;
+mod obj_det;
 mod ocr;
 mod preprocess;
 mod profiler;
@@ -6,7 +6,7 @@ mod search;
 mod storage;
 mod types;
 
-use crate::obj_ultralytics::YoloDetector;
+use crate::obj_det::YoloDetector;
 use crate::ocr::OcrPipeline;
 use crate::preprocess::{adaptive_resize, load_image};
 use crate::profiler::{StageTimer, SystemSampler, compute_stats, measure_record_storage};
@@ -50,10 +50,11 @@ fn collect_image_paths(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn main() -> Result<()> {
-    OrtGlobalThreadPoolOptions::new()
-        .with_intra_threads(4)
-        .commit()
-        .map_err(|e| anyhow::anyhow!("Failed to commit ONNX Runtime global thread pool: {e:?}"))?;
+    // OrtGlobalThreadPoolOptions::new()
+    //     .with_intra_threads(4)
+    //     .commit()
+    //     .map_err(|e| anyhow::anyhow!("Failed to commit ONNX Runtime global thread pool: {e:?}"))?;
+    let env = ort::init().with_telemetry(false).build()?;
 
     let image_dir = PathBuf::from("D:/test_det");
     let db_path = PathBuf::from("data/gallery.db");

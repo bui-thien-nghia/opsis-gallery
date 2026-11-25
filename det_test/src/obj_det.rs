@@ -34,7 +34,10 @@ fn parse_names(raw: &str) -> Result<Vec<String>> {
         let (key, value) = entry
             .split_once(':')
             .context("Invalid YOLO metadata names entry")?;
-        let index = key.trim().parse::<usize>().context("Invalid YOLO class index")?;
+        let index = key
+            .trim()
+            .parse::<usize>()
+            .context("Invalid YOLO class index")?;
         let mut name = value.trim();
         if name.starts_with(['\'', '"']) && name.ends_with(['\'', '"']) {
             name = &name[1..name.len().saturating_sub(1)];
@@ -44,7 +47,10 @@ fn parse_names(raw: &str) -> Result<Vec<String>> {
 
     anyhow::ensure!(!entries.is_empty(), "YOLO metadata contains no class names");
     for (expected, index) in (0..entries.len()).zip(entries.keys()) {
-        anyhow::ensure!(expected == *index, "YOLO metadata class indices are not contiguous");
+        anyhow::ensure!(
+            expected == *index,
+            "YOLO metadata class indices are not contiguous"
+        );
     }
 
     Ok(entries.into_values().collect())
@@ -59,11 +65,21 @@ fn input_size_from_session(session: &Session) -> Result<u32> {
         anyhow::bail!("YOLO model input is not a tensor")
     };
 
-    anyhow::ensure!(shape.len() == 4, "Unexpected YOLO input rank: {}", shape.len());
+    anyhow::ensure!(
+        shape.len() == 4,
+        "Unexpected YOLO input rank: {}",
+        shape.len()
+    );
     let height = shape[2];
     let width = shape[3];
-    anyhow::ensure!(height > 0 && width > 0, "YOLO input dimensions must be fixed");
-    anyhow::ensure!(height == width, "YOLO requires a square input, got {width}x{height}");
+    anyhow::ensure!(
+        height > 0 && width > 0,
+        "YOLO input dimensions must be fixed"
+    );
+    anyhow::ensure!(
+        height == width,
+        "YOLO requires a square input, got {width}x{height}"
+    );
 
     u32::try_from(width).context("Invalid YOLO input width")
 }
@@ -164,8 +180,10 @@ impl YoloDetector {
         let input = tensor.insert_axis(Axis(0));
         let outputs = self
             .session
-            .run(ort::inputs!["images" => ort::value::TensorRef::from_array_view(input.view())
-                .context("Failed to create YOLO input tensor")?])
+            .run(
+                ort::inputs!["images" => ort::value::TensorRef::from_array_view(input.view())
+                .context("Failed to create YOLO input tensor")?],
+            )
             .context("YOLO ONNX inference failed")?;
         let output = outputs
             .get("output0")
@@ -227,7 +245,9 @@ fn decode_yolo_output(
                 .map(|channel| channel[anchor])
                 .collect();
             if let Some((class_id, confidence)) = best_class(&values[4..], threshold) {
-                detections.push((class_id, confidence, values[0], values[1], values[2], values[3]));
+                detections.push((
+                    class_id, confidence, values[0], values[1], values[2], values[3],
+                ));
             }
         }
     // Some compatible exports use [1, anchors, 4+classes].
@@ -236,7 +256,9 @@ fn decode_yolo_output(
         for prediction in predictions.axis_iter(Axis(0)) {
             let values: Vec<f32> = prediction.iter().copied().collect();
             if let Some((class_id, confidence)) = best_class(&values[4..], threshold) {
-                detections.push((class_id, confidence, values[0], values[1], values[2], values[3]));
+                detections.push((
+                    class_id, confidence, values[0], values[1], values[2], values[3],
+                ));
             }
         }
     }
@@ -252,7 +274,10 @@ fn best_class(probabilities: &[f32], threshold: f32) -> Option<(usize, f32)> {
         .filter(|(_, confidence)| *confidence >= threshold)
 }
 
-fn non_maximum_suppression(mut detections: Vec<YoloDetection>, iou_threshold: f32) -> Vec<YoloDetection> {
+fn non_maximum_suppression(
+    mut detections: Vec<YoloDetection>,
+    iou_threshold: f32,
+) -> Vec<YoloDetection> {
     detections.sort_unstable_by(|a, b| b.confidence.total_cmp(&a.confidence));
     let mut kept = Vec::new();
 
@@ -313,10 +338,10 @@ mod tests {
 
     #[test]
     fn decodes_anchor_major_output_layout() {
-        let output = ndarray::arr3(&[
-            [[50.0, 60.0, 20.0, 30.0, 0.1, 0.8],
-             [10.0, 10.0, 5.0, 5.0, 0.9, 0.1]],
-        ]);
+        let output = ndarray::arr3(&[[
+            [50.0, 60.0, 20.0, 30.0, 0.1, 0.8],
+            [10.0, 10.0, 5.0, 5.0, 0.9, 0.1],
+        ]]);
 
         let detections = decode_yolo_output(&output.into_dyn(), 2, 0.5);
         assert_eq!(detections.len(), 2);
