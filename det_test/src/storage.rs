@@ -147,3 +147,71 @@ impl SqliteStore {
         Ok(records)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{OcrDetection, StageRuntimes, YoloDetection};
+
+    fn sample_record() -> ImageRecord {
+        ImageRecord {
+            file_name: "sample.jpg".to_string(),
+            file_path: "images/sample.jpg".to_string(),
+            object_classes: "person, boat".to_string(),
+            text_detections: "HARBOR".to_string(),
+            combined_text: "person, boat HARBOR".to_string(),
+            yolo_detections: vec![YoloDetection {
+                class: "person".to_string(),
+                confidence: 0.92,
+                bbox: [1.0, 2.0, 30.0, 40.0],
+            }],
+            ocr_detections: vec![OcrDetection {
+                text: "HARBOR".to_string(),
+                confidence: 0.88,
+                bbox: [[10, 10], [50, 10], [50, 25], [10, 25]],
+            }],
+            runtime: StageRuntimes {
+                preprocessing: 0.01,
+                yolo_inference: 0.02,
+                ocr_inference: 0.03,
+                postprocessing: 0.005,
+                total: 0.065,
+            },
+        }
+    }
+
+    #[test]
+    fn sqlite_round_trip_preserves_records() {
+        let dir = std::env::temp_dir().join(format!("det_test_storage_{}", std::process::id()));
+        let db_path = dir.join("test.db");
+        let record = sample_record();
+
+        let mut store = SqliteStore::open(&db_path).unwrap();
+        store.insert_records(std::slice::from_ref(&record)).unwrap();
+        let loaded = store.load_all_records().unwrap();
+        drop(store);
+        let _ = fs::remove_dir_all(&dir);
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].file_name, record.file_name);
+        assert_eq!(loaded[0].combined_text, record.combined_text);
+        assert_eq!(loaded[0].yolo_detections.len(), 1);
+        assert_eq!(loaded[0].ocr_detections.len(), 1);
+        assert_eq!(loaded[0].ocr_detections[0].text, "HARBOR");
+    }
+
+    #[test]
+    fn save_records_json_writes_valid_array() {
+        let dir = std::env::temp_dir().join(format!("det_test_json_{}", std::process::id()));
+        let json_path = dir.join("records.json");
+        let record = sample_record();
+
+        save_records_json(std::slice::from_ref(&record), &json_path).unwrap();
+        let raw = fs::read_to_string(&json_path).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+
+        let parsed: Vec<ImageRecord> = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].file_name, "sample.jpg");
+    }
+}
