@@ -1,0 +1,165 @@
+// Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+//! Hardware device support and abstraction.
+use std::fmt;
+use std::str::FromStr;
+
+/// Hardware device for inference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Device {
+    /// CPU (Central Processing Unit).
+    Cpu,
+    /// CUDA (Compute Unified Device Architecture) for NVIDIA GPUs.
+    /// The argument specifies the device index (e.g., 0 for the first GPU).
+    Cuda(usize),
+    /// `CoreML` execution provider for Apple Silicon / macOS.
+    CoreMl,
+    /// `DirectML` (Direct Machine Learning) for Windows.
+    /// The argument specifies the device index.
+    DirectMl(usize),
+    /// Intel CPU via the `OpenVINO` execution provider (`intel:cpu`).
+    IntelCpu,
+    /// Intel GPU via the `OpenVINO` execution provider (`intel:gpu`).
+    IntelGpu,
+    /// Intel NPU via the `OpenVINO` execution provider (`intel:npu`).
+    IntelNpu,
+    /// XNNPACK (optimized floating-point neural network inference operators) for CPU.
+    Xnnpack,
+    /// `TensorRT` (NVIDIA `TensorRT`) for high-performance deep learning inference.
+    /// The argument specifies the device index.
+    TensorRt(usize),
+    /// `ROCm` (Radeon Open Compute) for AMD GPUs.
+    /// The argument specifies the device index.
+    Rocm(usize),
+    /// `MIGraphX` for AMD GPUs.
+    /// The argument specifies the device index.
+    MiGraphX(usize),
+}
+
+impl fmt::Display for Device {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cpu => write!(f, "cpu"),
+            Self::Cuda(i) => write!(f, "cuda:{i}"),
+            Self::CoreMl => write!(f, "coreml"),
+            Self::DirectMl(i) => write!(f, "directml:{i}"),
+            Self::IntelCpu => write!(f, "intel:cpu"),
+            Self::IntelGpu => write!(f, "intel:gpu"),
+            Self::IntelNpu => write!(f, "intel:npu"),
+            Self::Xnnpack => write!(f, "xnnpack"),
+            Self::TensorRt(i) => write!(f, "tensorrt:{i}"),
+            Self::Rocm(i) => write!(f, "rocm:{i}"),
+            Self::MiGraphX(i) => write!(f, "migraphx:{i}"),
+        }
+    }
+}
+
+impl FromStr for Device {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.to_lowercase();
+        let indexed = [
+            ("cuda", Self::Cuda as fn(usize) -> Self),
+            ("directml", Self::DirectMl),
+            ("tensorrt", Self::TensorRt),
+            ("rocm", Self::Rocm),
+            ("migraphx", Self::MiGraphX),
+        ];
+        for (prefix, device) in indexed {
+            if let Some(rest) = s.strip_prefix(prefix) {
+                return Ok(device(parse_device_index(rest, &s)?));
+            }
+        }
+        match s.as_str() {
+            "cpu" => Ok(Self::Cpu),
+            "coreml" => Ok(Self::CoreMl),
+            "xnnpack" => Ok(Self::Xnnpack),
+            // Ultralytics OpenVINO naming: `intel:cpu`, `intel:gpu`, `intel:npu`.
+            "intel:cpu" => Ok(Self::IntelCpu),
+            "intel:gpu" => Ok(Self::IntelGpu),
+            "intel:npu" => Ok(Self::IntelNpu),
+            _ => Err(format!("Unknown device: {s}")),
+        }
+    }
+}
+
+/// Parse a trailing device index like `":0"`, defaulting to `0` when absent.
+///
+/// Anything else is an error rather than a silent fallback to device 0: a typo such as
+/// `cuda:abc`, `cuda:-1`, or `cudax` would otherwise run the whole job on the wrong device
+/// without telling anyone. `full` is the complete device string, for the error message.
+fn parse_device_index(s: &str, full: &str) -> Result<usize, String> {
+    match s.strip_prefix(':') {
+        None if s.is_empty() => Ok(0),
+        Some(index) => index
+            .parse()
+            .map_err(|_| format!("Invalid device index in '{full}': expected an integer")),
+        None => Err(format!("Unknown device: {full}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_device() {
+        assert_eq!(Device::from_str("cpu").unwrap(), Device::Cpu);
+        assert_eq!(Device::from_str("cuda").unwrap(), Device::Cuda(0));
+        assert_eq!(Device::from_str("cuda:0").unwrap(), Device::Cuda(0));
+        assert_eq!(Device::from_str("cuda:1").unwrap(), Device::Cuda(1));
+        assert_eq!(Device::from_str("coreml").unwrap(), Device::CoreMl);
+        assert_eq!(Device::from_str("migraphx").unwrap(), Device::MiGraphX(0));
+        assert_eq!(Device::from_str("migraphx:1").unwrap(), Device::MiGraphX(1));
+        assert_eq!(Device::from_str("directml").unwrap(), Device::DirectMl(0));
+        assert_eq!(Device::from_str("directml:1").unwrap(), Device::DirectMl(1));
+        // OpenVINO uses the Ultralytics `intel:<type>` naming.
+        assert_eq!(Device::from_str("intel:cpu").unwrap(), Device::IntelCpu);
+        assert_eq!(Device::from_str("intel:gpu").unwrap(), Device::IntelGpu);
+        assert_eq!(Device::from_str("intel:npu").unwrap(), Device::IntelNpu);
+        assert!(Device::from_str("intel").is_err());
+        assert!(Device::from_str("intel:tpu").is_err());
+        assert!(Device::from_str("openvino").is_err());
+    }
+
+    /// A malformed index used to silently resolve to device 0.
+    #[test]
+    fn test_parse_device_rejects_bad_index() {
+        for s in [
+            "cuda:abc",
+            "cuda:-1",
+            "cuda:",
+            "cuda:1.5",
+            "cudax",
+            "cuda0",
+            "tensorrt:x",
+            "rocm:-2",
+            "migraphx:x",
+            "directmlfoo",
+            "cuda:99999999999999999999",
+        ] {
+            assert!(Device::from_str(s).is_err(), "{s} should not parse");
+        }
+    }
+
+    #[test]
+    fn test_device_display_roundtrip() {
+        for s in [
+            "cpu",
+            "cuda:0",
+            "cuda:1",
+            "coreml",
+            "directml:0",
+            "tensorrt:2",
+            "rocm:3",
+            "migraphx:2",
+            "intel:cpu",
+            "intel:gpu",
+            "intel:npu",
+            "xnnpack",
+        ] {
+            assert_eq!(Device::from_str(s).unwrap().to_string(), s);
+        }
+    }
+}

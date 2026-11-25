@@ -1,0 +1,513 @@
+// Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+#![allow(clippy::multiple_crate_versions)]
+#![deny(dead_code)]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
+//! # Ultralytics YOLO Inference Library
+//!
+//! [![crates.io](https://img.shields.io/crates/v/ultralytics-inference.svg)](https://crates.io/crates/ultralytics-inference)
+//! [![docs.rs](https://docs.rs/ultralytics-inference/badge.svg)](https://docs.rs/ultralytics-inference)
+//! [![Downloads](https://img.shields.io/crates/d/ultralytics-inference?logo=rust&logoColor=white&label=downloads&color=CE422B)](https://crates.io/crates/ultralytics-inference)
+//! [![License](https://img.shields.io/crates/l/ultralytics-inference.svg)](https://github.com/ultralytics/inference/blob/main/LICENSE)
+//! [![MSRV](https://img.shields.io/crates/msrv/ultralytics-inference?logo=rust&logoColor=white&color=CE422B)](https://crates.io/crates/ultralytics-inference)
+//! [![dependency status](https://deps.rs/repo/github/ultralytics/inference/status.svg)](https://deps.rs/repo/github/ultralytics/inference)
+//!
+//!
+//! High-performance YOLO model inference library written in Rust, providing a safe
+//! and efficient interface for running [Ultralytics](https://www.ultralytics.com) YOLO
+//! models on images, videos, and streams.
+//!
+//! ## Features
+//!
+//! - **High Performance** - Pure Rust with zero-cost abstractions and SIMD-optimized preprocessing
+//! - **ONNX Runtime** - Leverages ONNX Runtime for cross-platform hardware acceleration
+//! - **Supported Models** - `YOLO26`, `YOLO11`, and `YOLOv8` (including YOLO26 end-to-end NMS-free exports), plus `RT-DETR` for detection
+//! - **All Tasks** - [Detection](https://docs.ultralytics.com/tasks/detect), [segmentation](https://docs.ultralytics.com/tasks/segment), [semantic segmentation](https://docs.ultralytics.com/tasks/semantic) and [depth estimation](https://docs.ultralytics.com/tasks/depth) (both YOLO26 only), [classification](https://docs.ultralytics.com/tasks/classify), [pose estimation](https://docs.ultralytics.com/tasks/pose), and [OBB](https://docs.ultralytics.com/tasks/obb)
+//! - **Ultralytics API** - Results API for easy migration
+//! - **Multiple Backends** - CPU, CUDA, `TensorRT`, `CoreML`, `OpenVINO`, and more
+//! - **Multiple Sources** - Images, directories, glob patterns, video, webcam, streams
+//!
+//! ## Installation
+//!
+//! Add to your `Cargo.toml`:
+//!
+#![doc = concat!("```toml\n[dependencies]\nultralytics-inference = \"", env!("CARGO_PKG_VERSION"), "\"\n```")]
+//!
+//! Or install the CLI tool:
+//!
+//! ```bash
+//! cargo install ultralytics-inference
+//! ```
+//!
+//! ## Quick Start (Library)
+//!
+//! ```no_run
+//! use ultralytics_inference::{YOLOModel, InferenceConfig};
+//!
+//! fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Load model - metadata (classes, task, imgsz) is read automatically
+//!     let mut model = YOLOModel::load("yolo26n.onnx")?;
+//!
+//!     // Run inference
+//!     let results = model.predict("image.jpg")?;
+//!
+//!     // Process results
+//!     for result in &results {
+//!         if let Some(ref boxes) = result.boxes {
+//!             println!("Found {} detections", boxes.len());
+//!             for i in 0..boxes.len() {
+//!                 let cls = boxes.cls()[i] as usize;
+//!                 let conf = boxes.conf()[i];
+//!                 let name = result.names.get(&cls).map(|s| s.as_str()).unwrap_or("unknown");
+//!                 println!("  {} {:.2}", name, conf);
+//!             }
+//!         }
+//!     }
+//!
+//!     Ok(())
+//! }
+//! ```
+//!
+//! For runnable programs you can copy and adapt, see the
+//! [examples](https://github.com/ultralytics/inference/tree/main/examples) directory.
+//!
+//! ## CLI Usage
+//!
+//! The `ultralytics-inference` CLI provides a command-line interface for running YOLO inference:
+//!
+//! ```bash
+//! # Install the CLI
+//! cargo install ultralytics-inference
+//!
+//! # Run with defaults (auto-downloads model and sample images)
+//! ultralytics-inference predict
+//!
+//! # Select task: auto-downloads the matching nano model
+//! ultralytics-inference predict --task segment
+//! ultralytics-inference predict --task semantic
+//! ultralytics-inference predict --task depth
+//! ultralytics-inference predict --task classify
+//! ultralytics-inference predict --task pose
+//! ultralytics-inference predict --task obb
+//!
+//! # Run on a specific image
+//! ultralytics-inference predict --model yolo26n.onnx --source image.jpg
+//!
+//! # Run on a directory of images
+//! ultralytics-inference predict --model yolo26n.onnx --source images/
+//!
+//! # With custom thresholds
+//! ultralytics-inference predict -m yolo26n.onnx -s image.jpg --conf 0.5 --iou 0.7
+//!
+//! # Filter by class IDs
+//! ultralytics-inference predict --source image.jpg --classes "0,1,2"
+//!
+//! # With visualization window
+//! ultralytics-inference predict --model yolo26n.onnx --source video.mp4 --show
+//!
+//! # Save annotated results
+//! ultralytics-inference predict --model yolo26n.onnx --source image.jpg --save
+//!
+//! # Save individual frames for video input
+//! ultralytics-inference predict --source video.mp4 --save-frames
+//!
+//! # Read scene text with YOLO26-Text and PaddleOCR
+//! ultralytics-inference predict --ocr --source sign.jpg
+//!
+//! # Read Korean, Cyrillic, Arabic and other scripts with a PaddleOCR language model
+//! ultralytics-inference predict --ocr korean_PP-OCRv5_mobile_rec --source sign.jpg
+//!
+//! # Track objects in a video (`track` and `video` features)
+//! ultralytics-inference track --model yolo26n.onnx --source video.mp4 --tracker tracktrack.yaml
+//!
+//! # Show help
+//! ultralytics-inference help
+//!
+//! # Show version
+//! ultralytics-inference version
+//! ```
+//!
+//! **CLI Options:**
+//!
+//! | Option | Short | Description | Default |
+//! |--------|-------|-------------|---------|
+//! | `--model` | `-m` | Path to ONNX model file; auto-downloaded if a known YOLO26/YOLO11/YOLOv8 name | `yolo26n.onnx` |
+//! | `--task` | | Task type (`detect`, `segment`, `semantic`\*, `depth`\*, `classify`, `pose`, `obb`); selects nano model when `--model` is omitted | `detect` |
+//! | `--source` | `-s` | Input source (image, directory, glob, video, webcam index, or URL) | Task-dependent sample assets |
+//! | `--conf` | | Confidence threshold | `0.25` (`0.1` for `track`) |
+//! | `--iou` | | `IoU` threshold for NMS | `0.5` |
+//! | `--max-det` | | Maximum number of detections | `300` |
+//! | `--imgsz` | | Inference image size | Model metadata |
+//! | `--rect [<BOOL>]` | | Enable rectangular inference (minimal padding) | `true` |
+//! | `--tile [<TILE>]` | | Tile size for overlapping-window inference; bare `--tile` uses `--imgsz` | off |
+//! | `--tile-overlap` | | Fraction of each tile shared with its neighbor | `0.2` |
+//! | `--retina-masks` | | Build segmentation masks at the original image size instead of the inference size | `false` |
+//! | `--ocr [<RECOGNIZER>]` | | Read the text in each box, oriented box or mask with `PaddleOCR`; bare `--ocr` uses PP-OCRv6, or name a PP-OCRv5 language model like `korean_PP-OCRv5_mobile_rec`; without `--model` this runs `yolo26n-text.onnx` | off |
+//! | `--batch` | | Batch size for inference | `1` |
+//! | `--quantize` | | Inference precision (`8`, `16`, `32`, `int8`, `fp16`, `fp32`, `w8a8`, `w16a16`, `w32a32`, `w8a16`, or `w8a32`) | Model precision |
+//! | `--save [<BOOL>]` | | Save annotated results to runs/\<task\>/predict | `true` |
+//! | `--save-frames` | | Save individual frames for video input | `false` |
+//! | `--save-json` | | Save semantic segmentation class-map PNGs for external evaluation | `false` |
+//! | `--show` | | Display results in a window | `false` |
+//! | `--show-labels [<BOOL>]` | | Show class names in box labels | `true` |
+//! | `--show-conf [<BOOL>]` | | Show confidences in box labels | `true` |
+//! | `--show-boxes [<BOOL>]` | | Draw boxes and their labels | `true` |
+//! | `--line-width` | | Box line width in pixels, which also sizes labels | from image size |
+//! | `--device` | | Device (cpu, cuda:0, coreml, directml:0, intel:cpu, intel:gpu, intel:npu, tensorrt:0, rocm:0, migraphx:0, xnnpack) | auto (best available provider; `cpu` when no accelerator feature is enabled) |
+//! | `--verbose [<BOOL>]` | | Show verbose output | `true` |
+//! | `--classes` | | Filter by class IDs, e.g. `0` or `"0,1,2"` or `"[0, 1, 2]"` | all classes |
+//! | `--tracker` | | `track` only: tracker name or YAML file | `tracktrack.yaml` |
+//!
+//! `[<BOOL>]` marks a flag whose value is optional: passing it bare (`--rect`) sets
+//! it to `true`, and an explicit `--rect false` or `--rect=false` turns it off.
+//!
+//! The legacy `--half` flag remains accepted for backward compatibility, maps
+//! to `--quantize 16`, and emits the same deprecation warning as Ultralytics
+//! Python. An explicit `--quantize` value wins.
+//! On CPU, ONNX Runtime widens an FP16 ONNX graph to FP32 weights while building the
+//! session, so FP16 exports run at FP32 speed. The source file is never modified.
+//!
+//! \* `semantic` (semantic segmentation) and `depth` (depth estimation) are YOLO26-only.
+//!
+//! ## Task-Specific Examples
+//!
+//! The library supports all YOLO tasks. Export models to ONNX with Ultralytics >=8.4.142:
+//!
+//! ```bash
+//! # Detection (default)
+//! yolo export model=yolo26n.pt format=onnx
+//!
+//! # Segmentation
+//! yolo export model=yolo26n-seg.pt format=onnx
+//!
+//! # Semantic Segmentation (YOLO26 only)
+//! yolo export model=yolo26n-sem.pt format=onnx
+//!
+//! # Depth Estimation (YOLO26 only)
+//! yolo export model=yolo26n-depth.pt format=onnx
+//!
+//! # Classification
+//! yolo export model=yolo26n-cls.pt format=onnx
+//!
+//! # Pose Estimation
+//! yolo export model=yolo26n-pose.pt format=onnx
+//!
+//! # Oriented Bounding Boxes
+//! yolo export model=yolo26n-obb.pt format=onnx
+//!
+//! # RT-DETR (detection only; no prebuilt ONNX to download, so export it yourself)
+//! yolo export model=rtdetr-l.pt format=onnx
+//! ```
+//!
+//! For detect, segment, pose, and OBB, `nms=None` (default) exports raw one-to-many
+//! outputs for NMS in Rust; `nms=False` selects the NMS-free one-to-one head when
+//! available (e.g. YOLO26); `nms=True` embeds NMS in ONNX. All three layouts are
+//! supported. Use `nms=None` for semantic, depth, and classify. Existing compatible
+//! models do not need re-exporting.
+//!
+//! Add `quantize=16` for an FP16 ONNX, or `quantize=8` for INT8 (which also
+//! needs a calibration dataset via `data=`).
+//!
+//! The task is auto-detected from ONNX metadata:
+//!
+//! ```no_run
+//! use ultralytics_inference::YOLOModel;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // Detection model - returns bounding boxes
+//! let mut model = YOLOModel::load("yolo26n.onnx")?;
+//! let results = model.predict("image.jpg")?;
+//! if let Some(ref boxes) = results[0].boxes {
+//!     println!("Found {} detections", boxes.len());
+//!     for i in 0..boxes.len() {
+//!         let cls = boxes.cls()[i] as usize;
+//!         let conf = boxes.conf()[i];
+//!         let name = results[0].names.get(&cls).map(|s| s.as_str()).unwrap_or("unknown");
+//!         println!("  {} {:.2}", name, conf);
+//!     }
+//! }
+//!
+//! // Segmentation model - returns instance masks
+//! let mut model = YOLOModel::load("yolo26n-seg.onnx")?;
+//! let results = model.predict("image.jpg")?;
+//! if let Some(ref masks) = results[0].masks {
+//!     println!("Found {} instance masks", masks.len());
+//! }
+//!
+//! // Pose model - returns keypoints
+//! let mut model = YOLOModel::load("yolo26n-pose.onnx")?;
+//! let results = model.predict("image.jpg")?;
+//! if let Some(ref keypoints) = results[0].keypoints {
+//!     println!("Found {} poses", keypoints.len());
+//! }
+//!
+//! // OBB model - returns oriented bounding boxes
+//! let mut model = YOLOModel::load("yolo26n-obb.onnx")?;
+//! let results = model.predict("image.jpg")?;
+//! if let Some(ref obb) = results[0].obb {
+//!     println!("Found {} oriented boxes", obb.len());
+//!     for i in 0..obb.len() {
+//!         let conf = obb.conf()[i];
+//!         let cls = obb.cls()[i] as usize;
+//!         let name = results[0].names.get(&cls).map(|s| s.as_str()).unwrap_or("unknown");
+//!         println!("  {} {:.2}", name, conf);
+//!     }
+//! }
+//!
+//! // Classification model - returns probabilities
+//! let mut model = YOLOModel::load("yolo26n-cls.onnx")?;
+//! let results = model.predict("image.jpg")?;
+//! if let Some(ref probs) = results[0].probs {
+//!     println!("Top-1: class {} ({:.1}%)", probs.top1(), probs.top1conf() * 100.0);
+//! }
+//!
+//! // Semantic segmentation model (YOLO26 only) - returns a per-pixel class map
+//! let mut model = YOLOModel::load("yolo26n-sem.onnx")?;
+//! let results = model.predict("image.jpg")?;
+//! if let Some(ref sem) = results[0].semantic_mask {
+//!     println!("Semantic mask shape: {:?}", sem.data.shape());
+//! }
+//!
+//! // Depth model (YOLO26 only) - returns a per-pixel depth map in meters
+//! let mut model = YOLOModel::load("yolo26n-depth.onnx")?;
+//! let results = model.predict("image.jpg")?;
+//! if let Some(ref depth) = results[0].depth {
+//!     println!("Depth map shape: {:?}", depth.data.shape());
+//!     if let (Some(lo), Some(hi)) = (depth.min_depth(), depth.max_depth()) {
+//!         println!("Depth range: {:.2}-{:.2} m", lo, hi);
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Annotated depth is the colorized map blended over the image at `alpha = 0.6` with the
+//! `jet` colormap and `disparity` normalization.
+//! [`annotate_image_with`](annotate::annotate_image_with) selects a different
+//! [`Colormap`](visualizer::color::Colormap) or [`DepthViz`](visualizer::color::DepthViz);
+//! the CLI always renders the default.
+//!
+//! ## Custom Configuration
+//!
+//! Use the builder pattern to customize inference settings:
+//!
+//! ```rust
+//! use ultralytics_inference::InferenceConfig;
+//!
+//! let config = InferenceConfig::new()
+//!     .with_confidence(0.5)    // Confidence threshold
+//!     .with_iou(0.45)          // NMS IoU threshold
+//!     .with_max_det(300) // Max detections per image
+//!     .with_imgsz(640, 640)    // Input image size
+//!     .with_tile(640);         // Overlapping 640 pixel windows for large images
+//! ```
+//!
+//! ## Hardware Acceleration
+//!
+//! See the [CUDA / `TensorRT` acceleration guide](crate::cuda_guide) for setup,
+//! requirements, and the zero-copy GPU preprocess fast path.
+//!
+//! On aarch64 no GPU build is published; see the [DGX Spark guide](crate::dgx_guide).
+//!
+//! Enable hardware acceleration with Cargo features:
+//!
+//! ```bash
+//! # NVIDIA CUDA
+//! cargo build --release --features cuda
+//!
+//! # NVIDIA TensorRT
+//! cargo build --release --features tensorrt
+//!
+//! # NVIDIA GPU preprocess + zero-copy device input
+//! # (requires CUDA toolkit; see docs/CUDA.md)
+//! cargo build --release --features cuda-preprocess
+//!
+//! # Apple CoreML
+//! cargo build --release --features coreml
+//!
+//! # Intel OpenVINO
+//! cargo build --release --features openvino
+//!
+//! # Native OpenVINO IR (.xml) models, run by the OpenVINO runtime without ONNX Runtime
+//! # (see docs/OPENVINO.md for installing the runtime on Linux, Windows and macOS)
+//! cargo build --release --features openvino-native
+//! ```
+//!
+//! ## Results API
+//!
+//! The [`Results`] struct provides access to inference outputs:
+//!
+//! - [`Boxes`] - Bounding boxes with `xyxy()`, `xywh()`, `xyxyn()`, `xywhn()`, `conf()`, `cls()` methods
+//! - [`Masks`] - Segmentation masks with `data`, `orig_shape` fields and `xy()`, `xyn()` outlines
+//! - [`SemanticMask`] - Per-pixel class map with `class_ids()`, `classes_present()` methods
+//! - [`DepthMap`] - Per-pixel depth map with `min_depth()`, `max_depth()`, `colorize(colormap, viz)` methods
+//! - [`Probs`] - Classification probabilities with `top1()`, `top5()`, `top1conf()`, `top5conf()` methods
+//! - [`Keypoints`] - Pose keypoints with `xy()`, `xyn()`, `conf()` methods
+//! - [`Obb`] - Oriented bounding boxes with `xyxyxyxy()`, `xywhr()`, `conf()`, `cls()` methods
+//! - [`Speed`] - Per-stage timings with a `total()` method
+//!
+//! ## Module Overview
+//!
+//! | Module | Description |
+//! |--------|-------------|
+//! | [`model`] | Core [`YOLOModel`] for loading models and running inference |
+//! | [`ocr`] | Scene text OCR: `PaddleOCR` recognition of YOLO26-Text detections ([`ocr::TextRecognizer`]) |
+//! | [`results`] | Output types ([`Results`], [`Boxes`], [`Masks`], etc.) |
+//! | [`inference`] | [`InferenceConfig`] for customizing inference settings |
+//! | [`source`] | Input source handling ([`Source`], [`SourceIterator`]) |
+//! | [`task`] | YOLO task types ([`Task`]: Detect, Segment, Semantic, Depth, Classify, Pose, Obb) |
+//! | [`mod@error`] | Error types ([`InferenceError`], [`Result`]) |
+//! | [`preprocessing`] | Image preprocessing utilities |
+//! | [`postprocessing`] | Post-processing for all tasks (NMS/decode for detection; argmax for semantic segmentation; letterbox-crop resize for depth) |
+//! | [`metadata`] | ONNX model metadata parsing |
+//!
+//! ## Feature Flags
+//!
+//! Default features (enabled unless `--no-default-features` is passed): `annotate`, `visualize`.
+//!
+//! | Feature | Description |
+//! |---------|-------------|
+//! | `annotate` | Image annotation for `--save` (default) |
+//! | `visualize` | Real-time window display for `--show` (default) |
+//! | `video` | Video file decoding/encoding (requires `FFmpeg`) |
+//! | `track` | Object tracking: the `track` command and `Tracker` |
+//! | `cuda` | NVIDIA CUDA acceleration |
+//! | `tensorrt` | NVIDIA `TensorRT` optimization (includes `cuda`) |
+//! | `cuda-preprocess` | GPU preprocessing with zero-copy `TensorRT` input |
+//! | `coreml` | Apple `CoreML` (macOS/iOS) |
+//! | `openvino` | Intel `OpenVINO` (Linux and Windows x64) |
+//! | `openvino-native` | Loads native `OpenVINO` IR (`.xml`) models, see [`openvino_guide`] |
+//! | `onednn` | Intel oneDNN |
+//! | `rocm` | AMD `ROCm` (needs your own `ONNX Runtime` build) |
+//! | `migraphx` | AMD `MIGraphX` (Linux x64) |
+//! | `directml` | `DirectML` (Windows) |
+//! | `nnapi` | Android Neural Networks API |
+//! | `qnn` | Qualcomm Neural Networks |
+//! | `xnnpack` | XNNPACK (cross-platform) |
+//! | `acl` | ARM Compute Library |
+//! | `tvm` | Apache TVM |
+//! | `rknpu` | Rockchip NPU |
+//! | `cann` | Huawei CANN |
+//! | `webgpu` | WebGPU |
+//! | `azure` | Azure |
+//! | `nvidia` | Convenience: `cuda` + `tensorrt` |
+//! | `amd` | Convenience: `rocm` + `migraphx` |
+//! | `intel` | Convenience: `openvino` + `onednn` |
+//! | `mobile` | Convenience: `nnapi` + `coreml` + `qnn` |
+//! | `all` | Convenience: `annotate` + `visualize` + `video` + `track` |
+//!
+//! ## License
+//!
+//! This project is dual-licensed under [AGPL-3.0](https://github.com/ultralytics/inference/blob/main/LICENSE)
+//! for open-source use or [Ultralytics Enterprise License](https://www.ultralytics.com/license)
+//! for commercial applications.
+
+/// DGX Spark (aarch64) setup guide rendered from `docs/DGX.md`.
+#[allow(clippy::doc_markdown)]
+#[doc = include_str!("../docs/DGX.md")]
+pub mod dgx_guide {}
+
+/// CUDA / `TensorRT` acceleration guide rendered from `docs/CUDA.md`.
+#[allow(clippy::doc_markdown)]
+#[doc = include_str!("../docs/CUDA.md")]
+pub mod cuda_guide {}
+
+/// Native `OpenVINO` IR model guide rendered from `docs/OPENVINO.md`.
+#[allow(clippy::doc_markdown)]
+#[doc = include_str!("../docs/OPENVINO.md")]
+pub mod openvino_guide {}
+
+#[cfg(feature = "annotate")]
+pub mod annotate;
+pub mod device;
+pub mod error;
+pub mod inference;
+
+pub mod logging;
+pub mod metadata;
+pub mod postprocessing;
+
+// Palettes + pose skeleton. Pure data (the native window viewer inside is gated
+// behind the `visualize` feature), so it compiles on wasm and the browser crate
+// reuses the exact same colors/skeleton as the native annotator.
+pub mod visualizer;
+
+// Internal rayon/sequential abstraction. On native targets it re-exports the
+// rayon prelude; on `wasm32` (no OS threads) it provides sequential shims so the
+// shared preprocessing/postprocessing code compiles unchanged. See `src/parallel.rs`.
+mod parallel;
+
+// Backend and host-only modules. These depend on the native ONNX Runtime (`ort`),
+// OS threads, filesystem, sockets, or windowing, none of which are available on
+// `wasm32-unknown-unknown`. The browser build (the `ultralytics-inference-web`
+// crate) reuses only the wasm-safe modules above plus its own `ort-web` session.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod batch;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cli;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod download;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod io;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod model;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod ocr;
+#[cfg(all(feature = "openvino-native", not(target_arch = "wasm32")))]
+mod openvino;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod source;
+
+// CUDA-side preprocess + zero-copy device input - internal fast path used by
+// `YOLOModel` when the `cuda-preprocess` feature is enabled and the device is
+// CUDA/TensorRT. Gated by `InferenceConfig::with_cuda_preprocess(false)` to
+// opt back into CPU preprocess.
+#[cfg(feature = "cuda-preprocess")]
+mod cuda_inference;
+pub mod preprocessing;
+pub mod results;
+pub mod task;
+#[cfg(feature = "track")]
+pub mod tracker;
+pub mod utils;
+
+pub use device::Device;
+pub use error::{InferenceError, Result};
+pub use inference::{InferenceConfig, Quantization};
+pub use metadata::ModelMetadata;
+#[cfg(not(target_arch = "wasm32"))]
+pub use model::{YOLOModel, set_ort_environment};
+pub use preprocessing::{PreprocessResult, preprocess_image, preprocess_image_with_precision};
+pub use results::{Boxes, DepthMap, Keypoints, Masks, Obb, Probs, Results, SemanticMask, Speed};
+#[cfg(not(target_arch = "wasm32"))]
+pub use source::{Source, SourceIterator, SourceMeta};
+pub use task::Task;
+#[cfg(feature = "track")]
+pub use tracker::{GmcMethod, Tracker, TrackerConfig, TrackerType};
+
+/// Library version.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Library name.
+pub const NAME: &str = env!("CARGO_PKG_NAME");
+
+/// Application display name.
+pub const DISPLAY_NAME: &str = "Ultralytics Inference";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_version() {
+        // Version should be semver format like "0.0.5"
+        assert!(VERSION.contains('.'));
+    }
+
+    #[test]
+    fn test_name() {
+        assert_eq!(NAME, "ultralytics-inference");
+    }
+}

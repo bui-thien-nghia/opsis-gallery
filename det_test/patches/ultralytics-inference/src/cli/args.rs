@@ -1,0 +1,330 @@
+// Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+use crate::task::Task;
+use crate::{InferenceConfig, Quantization};
+use clap::{Args, Parser, Subcommand};
+
+/// CLI arguments parser.
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+#[command(propagate_version = true)]
+#[command(after_help = r#"Predict Options:
+    --model, -m <MODEL>    Path to ONNX model file, or OpenVINO .xml file or export folder [default: yolo26n.onnx]
+    --task <TASK>          Task type: detect, segment, semantic, depth, classify, pose, obb [default: detect]
+                           Selects the matching nano model when --model is omitted
+    --source, -s <SOURCE>  Input source (image, directory, glob, video, webcam, or URL)
+    --conf <CONF>          Confidence threshold [default: 0.25, 0.1 for track]
+    --iou <IOU>            IoU threshold for NMS [default: 0.5]
+    --max-det <MAX_DET>    Maximum number of detections [default: 300]
+    --imgsz <IMGSZ>        Inference image size [default: model metadata]
+    --rect [<BOOL>]        Enable rectangular inference (minimal padding) [default: true]
+    --tile [<TILE>]        Tile size for overlapping-window inference (bare uses --imgsz)
+    --tile-overlap <FRAC>  Fraction of each tile shared with its neighbor [default: 0.2]
+    --retina-masks         Build segmentation masks at the original image size [default: false]
+    --ocr [<RECOGNIZER>]   Read the text in each detection with PaddleOCR [default model: yolo26n-text]
+                           Bare uses PP-OCRv6, or name a language model like korean_PP-OCRv5_mobile_rec
+    --batch <BATCH>        Batch size for inference [default: 1]
+    --quantize <QUANTIZE>  Precision: 8, 16, 32, int8, fp16, fp32, w8a8, w16a16, w32a32, w8a16, or w8a32
+    --save [<BOOL>]        Save annotated images to runs/<task>/predict [default: true]
+    --save-frames          Save individual frames for video input (instead of video file)
+    --save-json            Save semantic segmentation class-map PNGs for external evaluation
+    --show                 Display results in a window [default: false]
+    --show-labels [<BOOL>] Show class names in box labels [default: true]
+    --show-conf [<BOOL>]   Show confidences in box labels [default: true]
+    --show-boxes [<BOOL>]  Draw boxes and their labels [default: true]
+    --line-width <WIDTH>   Box line width in pixels, which also sizes labels [default: from image size]
+    --device <DEVICE>      Device (cpu, cuda:0, coreml, directml:0, intel:cpu, intel:gpu, intel:npu, tensorrt:0, rocm:0, migraphx:0, xnnpack)
+    --verbose [<BOOL>]     Show verbose output [default: true]
+    --classes <CLASSES>    Filter by class IDs (e.g., "0", "0,1,2", "[0, 1]")
+
+Track Options (with the track feature, plus the predict options):
+    --tracker <TRACKER>    botsort, bytetrack, ocsort, deepocsort, fasttrack, tracktrack or a YAML file [default: tracktrack.yaml]
+
+Examples:
+    ultralytics-inference predict
+    ultralytics-inference predict --task segment
+    ultralytics-inference predict --task semantic --source image.jpg
+    ultralytics-inference predict --task depth --source image.jpg
+    ultralytics-inference predict --task classify --source image.jpg
+    ultralytics-inference predict --task pose
+    ultralytics-inference predict --task obb --source aerial.jpg
+    ultralytics-inference predict --ocr --source sign.jpg
+    ultralytics-inference predict --ocr korean_PP-OCRv5_mobile_rec --source sign.jpg
+    ultralytics-inference predict --model yolo26n.onnx --source image.jpg
+    ultralytics-inference predict --source video.mp4 --rect
+    ultralytics-inference predict --source video.mp4 --save-frames
+    ultralytics-inference predict --source 0 --conf 0.5 --show
+    ultralytics-inference predict --source assets/ --save --quantize 16
+    ultralytics-inference predict --source image.jpg --device cuda:0
+    ultralytics-inference predict --source image.jpg --classes 0
+    ultralytics-inference predict --source image.jpg --line-width 4 --show-conf false
+    ultralytics-inference track --source video.mp4 --tracker tracktrack.yaml"#)]
+pub struct Cli {
+    #[command(subcommand)]
+    /// Subcommand to execute.
+    pub command: Commands,
+}
+
+/// Commands for the CLI.
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Run inference on an image, video, or stream
+    Predict(PredictArgs),
+    /// Track objects across the frames of a video or stream
+    #[cfg(feature = "track")]
+    Track(TrackArgs),
+    /// Print version information
+    Version,
+}
+
+/// Arguments for the predict command.
+#[derive(Args, Debug)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct PredictArgs {
+    /// Path to ONNX model file, or `OpenVINO` `.xml` file or export folder
+    #[arg(short, long)]
+    pub model: Option<String>,
+
+    /// Task type; selects nano model for auto-download when --model is omitted
+    /// (detect, segment, semantic, depth, classify, pose, obb)
+    #[arg(long)]
+    pub task: Option<Task>,
+
+    /// Input source (image, directory, glob, video, webcam, or URL)
+    #[arg(short, long)]
+    pub source: Option<String>,
+
+    /// Confidence threshold
+    #[arg(long, default_value_t = InferenceConfig::DEFAULT_CONF)]
+    pub conf: f32,
+
+    /// `IoU` threshold for NMS
+    #[arg(long, default_value_t = InferenceConfig::DEFAULT_IOU)]
+    pub iou: f32,
+
+    /// Maximum number of detections
+    #[arg(long, default_value_t = InferenceConfig::DEFAULT_MAX_DET)]
+    pub max_det: usize,
+
+    /// Inference image size
+    #[arg(long)]
+    pub imgsz: Option<usize>,
+
+    /// Enable minimal padding (rectangular inference)
+    #[arg(long, default_value_t = InferenceConfig::DEFAULT_RECT, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
+    pub rect: bool,
+
+    /// Tile size for overlapping-window inference on large images (bare `--tile` uses `--imgsz`)
+    #[arg(long, num_args = 0..=1, default_missing_value = "0")]
+    pub tile: Option<u32>,
+
+    /// Fraction of each tile shared with its neighbor
+    #[arg(long, default_value_t = InferenceConfig::DEFAULT_TILE_OVERLAP)]
+    pub tile_overlap: f32,
+
+    /// Build segmentation masks at the original image size
+    #[arg(long, default_value_t = false)]
+    pub retina_masks: bool,
+
+    /// Read the text in each box, oriented box or mask with this `PaddleOCR` recognizer (bare `--ocr`
+    /// uses PP-OCRv6); without `--model` this runs the yolo26n-text detector
+    #[arg(long, num_args = 0..=1, default_missing_value = crate::ocr::DEFAULT_RECOGNIZER)]
+    pub ocr: Option<String>,
+
+    /// Batch size for inference
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+    pub batch: u32,
+
+    /// Inference precision (8, 16, 32, int8, fp16, fp32, w8a8, w16a16, w32a32, w8a16, or w8a32)
+    #[arg(long)]
+    pub quantize: Option<Quantization>,
+
+    /// Legacy FP16 inference flag; use `--quantize 16`
+    #[arg(long, hide = true)]
+    pub half: bool,
+
+    /// Save annotated images to runs/\<task\>/predict
+    #[arg(long, default_value_t = InferenceConfig::DEFAULT_SAVE, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
+    pub save: bool,
+
+    /// Save individual frames for video input (instead of video file)
+    #[arg(long, default_value_t = InferenceConfig::DEFAULT_SAVE_FRAMES)]
+    pub save_frames: bool,
+
+    /// Save semantic segmentation class-map PNGs for external evaluation
+    #[arg(long, default_value_t = false)]
+    pub save_json: bool,
+
+    /// Display results in a window
+    #[arg(long, default_value_t = false)]
+    pub show: bool,
+
+    /// Show class names in box labels
+    #[arg(long, default_value_t = true, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
+    pub show_labels: bool,
+
+    /// Show confidences in box labels
+    #[arg(long, default_value_t = true, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
+    pub show_conf: bool,
+
+    /// Draw boxes and their labels
+    #[arg(long, default_value_t = true, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
+    pub show_boxes: bool,
+
+    /// Box line width in pixels, which also sizes labels [default: from image size]
+    #[arg(long)]
+    pub line_width: Option<u32>,
+
+    /// Device to use (cpu, cuda:0, coreml, directml:0, intel:cpu, intel:gpu, intel:npu, tensorrt:0, rocm:0, migraphx:0, xnnpack)
+    #[arg(long)]
+    pub device: Option<String>,
+
+    /// Show verbose output
+    #[arg(long, default_value_t = true, num_args = 0..=1, default_missing_value = "true", action = clap::ArgAction::Set)]
+    pub verbose: bool,
+
+    /// Filter by class IDs (e.g. 0 or "0,1,2" or "[0, 1, 2]")
+    ///
+    /// Supported formats:
+    /// - Single integer: --classes 0
+    /// - Comma-separated list: --classes "0,1,2"
+    /// - List syntax: --classes "[0, 1, 2]"
+    ///
+    /// Note: When passing a list directly without quotes, avoid spaces to prevent
+    /// shell argument parsing issues (e.g. use --classes 0,1 not --classes 0, 1).
+    #[arg(long, allow_hyphen_values = true)]
+    pub classes: Option<String>,
+}
+
+/// Arguments for the track command, whose confidence threshold defaults to
+/// [`InferenceConfig::DEFAULT_TRACK_CONF`] like Ultralytics `model.track()`.
+#[cfg(feature = "track")]
+#[derive(Args, Debug)]
+#[command(mut_arg("conf", |a| a.default_value("0.1")))]
+pub struct TrackArgs {
+    /// Prediction arguments.
+    #[command(flatten)]
+    pub predict: PredictArgs,
+
+    /// Tracker: botsort, bytetrack, ocsort, deepocsort, fasttrack, tracktrack, or a YAML file
+    /// with the keys of the Ultralytics tracker configs
+    #[arg(long, default_value = "tracktrack.yaml")]
+    pub tracker: String,
+}
+
+/// Parse class IDs from various formats: `"1,2,3"`, `"[1,2,3]"`, `"(1,2,3)"`
+///
+/// # Returns
+///
+/// A `Vec<usize>` of parsed class IDs, or an empty vec if the input is blank.
+///
+/// # Errors
+///
+/// Returns a `String` error message if any segment of the string cannot be parsed as a `usize`.
+pub fn parse_classes(s: &str) -> Result<Vec<usize>, String> {
+    // Remove brackets, parentheses, and quotes
+    let cleaned = s
+        .trim()
+        .trim_matches(|c| c == '[' || c == ']' || c == '(' || c == ')' || c == '"' || c == '\'');
+
+    if cleaned.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    cleaned
+        .split(',')
+        .map(|part| {
+            part.trim()
+                .parse::<usize>()
+                .map_err(|e| format!("Invalid class ID '{}': {}", part.trim(), e))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_cli() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn test_predict_args_defaults() {
+        let args = Cli::parse_from(["app", "predict", "--model", "yolo26n.onnx"]);
+        let Commands::Predict(predict_args) = args.command else {
+            panic!("expected predict command");
+        };
+        assert_eq!(predict_args.model, Some("yolo26n.onnx".to_string()));
+        assert!((predict_args.conf - InferenceConfig::DEFAULT_CONF).abs() < f32::EPSILON);
+        assert!((predict_args.iou - InferenceConfig::DEFAULT_IOU).abs() < f32::EPSILON);
+        assert!(predict_args.rect);
+        assert_eq!(predict_args.max_det, 300);
+        assert_eq!(predict_args.quantize, InferenceConfig::DEFAULT_QUANTIZE);
+        assert!(!predict_args.half);
+        assert!(predict_args.verbose);
+        assert!(predict_args.source.is_none());
+    }
+
+    #[test]
+    fn test_predict_args_custom() {
+        let args = Cli::parse_from([
+            "app",
+            "predict",
+            "--model",
+            "custom.onnx",
+            "--source",
+            "test.jpg",
+            "--conf",
+            "0.8",
+            "--quantize",
+            "fp16",
+            "--verbose",
+            "false",
+        ]);
+        let Commands::Predict(predict_args) = args.command else {
+            panic!("expected predict command");
+        };
+        assert_eq!(predict_args.model, Some("custom.onnx".to_string()));
+        assert_eq!(predict_args.source, Some("test.jpg".to_string()));
+        assert!((predict_args.conf - 0.8).abs() < f32::EPSILON);
+        assert_eq!(predict_args.quantize, Some(Quantization::Fp16));
+        assert!(!predict_args.verbose);
+    }
+
+    #[test]
+    fn test_deprecated_half_arg() {
+        let args = Cli::parse_from(["app", "predict", "--half"]);
+        let Commands::Predict(predict_args) = args.command else {
+            panic!("expected predict command");
+        };
+        assert!(predict_args.half);
+    }
+
+    #[test]
+    fn test_version_command() {
+        let args = Cli::parse_from(["app", "version"]);
+        assert!(matches!(args.command, Commands::Version));
+    }
+
+    #[test]
+    fn test_parse_classes_formats() {
+        assert_eq!(parse_classes("0").unwrap(), vec![0]);
+        assert_eq!(parse_classes("0,1,2").unwrap(), vec![0, 1, 2]);
+        assert_eq!(parse_classes("[0, 1, 2]").unwrap(), vec![0, 1, 2]);
+        assert_eq!(parse_classes("(3, 4)").unwrap(), vec![3, 4]);
+        assert_eq!(parse_classes(" 5 , 6 ").unwrap(), vec![5, 6]);
+        // Empty / bracket-only inputs yield an empty selection.
+        assert_eq!(parse_classes("").unwrap(), Vec::<usize>::new());
+        assert_eq!(parse_classes("[]").unwrap(), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn test_parse_classes_invalid() {
+        let err = parse_classes("0,abc").unwrap_err();
+        assert!(err.contains("Invalid class ID 'abc'"));
+        assert!(parse_classes("-1").is_err()); // usize rejects negatives
+    }
+}

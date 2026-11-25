@@ -8,6 +8,7 @@ edition = "2024"
 ort = "2.0.0-rc.15"
 oar-ocr = "0.11.0"
 oar-ocr-core = "0.11.0"
+ultralytics-inference = { version = "0.0.61", default-features = false }
 ndarray = "0.17"
 image = "0.25"
 
@@ -21,3 +22,6 @@ nucleo-matcher = "0.3"
 indicatif = "0.17"
 anyhow = "1.0"
 sysinfo = "0.40"
+
+[patch.crates-io]
+ultralytics-inference = { path = "patches/ultralytics-inference" }

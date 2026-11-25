@@ -1,0 +1,423 @@
+// Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+//! Integration tests for the inference library
+
+use tempfile::tempdir;
+#[cfg(any(feature = "coreml", feature = "cuda"))]
+use ultralytics_inference::Device;
+use ultralytics_inference::InferenceConfig;
+#[cfg(any(feature = "coreml", feature = "cuda", feature = "openvino-native"))]
+use ultralytics_inference::YOLOModel;
+use ultralytics_inference::cli::args::PredictArgs;
+use ultralytics_inference::cli::predict::run_prediction;
+use ultralytics_inference::task::Task;
+
+/// CLI arguments for an end-to-end run on the bus.jpg sample.
+fn predict_args(model: &str, task: Option<Task>, save_json: bool) -> PredictArgs {
+    PredictArgs {
+        model: Some(model.to_string()),
+        task,
+        source: Some(BUS.to_string()),
+        conf: 0.25,
+        iou: 0.45,
+        max_det: 300,
+        imgsz: Some(640),
+        rect: false,
+        tile: None,
+        tile_overlap: InferenceConfig::DEFAULT_TILE_OVERLAP,
+        retina_masks: false,
+        ocr: None,
+        batch: 1,
+        quantize: None,
+        half: false,
+        save: false,
+        save_frames: false,
+        save_json,
+        show: false,
+        show_labels: true,
+        show_conf: true,
+        show_boxes: true,
+        line_width: None,
+        device: None,
+        verbose: false,
+        classes: None,
+    }
+}
+
+/// The bus.jpg sample shipped in the repo. Models load from the repo root like the unit tests
+/// do, so each one downloads once and a `TensorRT` engine cache next to it is reused.
+const BUS: &str = "assets/bus.jpg";
+
+/// Runs a native `OpenVINO` export end to end: set `OPENVINO_TEST_MODEL` to a detect model folder
+/// from `yolo export format=openvino` and install the `OpenVINO` runtime.
+#[cfg(feature = "openvino-native")]
+#[test]
+#[ignore = "needs an OpenVINO detect export in OPENVINO_TEST_MODEL and the OpenVINO runtime"]
+fn test_openvino_model_predicts() {
+    let dir = std::env::var("OPENVINO_TEST_MODEL").expect("OPENVINO_TEST_MODEL is not set");
+    let mut model = YOLOModel::load(dir).unwrap();
+    assert_eq!(model.execution_provider(), "OpenVINO");
+    let results = model.predict("assets/bus.jpg").unwrap();
+    assert!(results[0].boxes.as_ref().is_some_and(|b| b.len() >= 4));
+}
+
+/// End-to-end `CoreML` test covering two known regressions:
+///
+/// 1. **Issue #148 / PR #149**: `GatherElements op: Out of range` during warmup.
+///    `CoreML`'s DFL head produces out-of-range gather indices on an all-zeros dummy input.
+///
+/// 2. **`graph_input_cast_0` crash**: `CoreML` must not rename the ONNX input
+///    (e.g. `images`) to an internal cast node that ORT cannot feed. The current
+///    `MLProgram` path uses static input shapes and `FastPrediction` to avoid that cast.
+#[cfg(feature = "coreml")]
+#[test]
+#[ignore = "downloads a YOLO model; requires CoreML (macOS only)"]
+fn test_coreml_model_loads_and_warms_up() {
+    let config = InferenceConfig::new().with_device(Device::CoreMl);
+    let mut model =
+        YOLOModel::load_with_config("yolo26n.onnx", config).expect("CoreML model should load");
+
+    // warmup() must succeed: graph_input_cast_0 errors are gone (static-shape MLProgram path)
+    // and GatherElements out-of-range is tolerated (issue #148 fix).
+    model.warmup().expect("CoreML warmup should not fail");
+}
+
+#[test]
+#[ignore = "downloads a YOLO model and sample image"]
+fn test_run_prediction_e2e() {
+    let args = PredictArgs {
+        source: Some("https://ultralytics.com/images/bus.jpg".to_string()),
+        ..predict_args("yolo26n.onnx", None, false)
+    };
+
+    run_prediction(&args);
+}
+
+#[test]
+#[ignore = "downloads the semantic and depth models from GitHub releases; requires network"]
+fn test_auto_download_semantic_and_depth_models() {
+    let temp_dir = tempdir().expect("temp dir should be created");
+    for name in ["yolo26n-sem.onnx", "yolo26n-depth.onnx"] {
+        let model_path = temp_dir.path().join(name);
+        let result = ultralytics_inference::download::try_download_model(&model_path);
+        assert!(
+            result.is_ok(),
+            "{name} download should succeed: {:?}",
+            result.err()
+        );
+        let size = std::fs::metadata(&model_path).map_or(0, |m| m.len());
+        assert!(
+            size > 1_000_000,
+            "{name} should be a real model (>1 MB), got {size} bytes"
+        );
+    }
+}
+
+#[test]
+#[ignore = "downloads a YOLO semantic model and sample image"]
+fn test_run_prediction_e2e_semantic() {
+    let model_path = "yolo26n-sem.onnx";
+
+    let args = predict_args(model_path, Some(Task::Semantic), false);
+
+    run_prediction(&args);
+}
+
+#[test]
+#[ignore = "downloads a YOLO semantic model and sample image; writes class-map PNG to runs/"]
+fn test_semantic_save_class_map() {
+    let model_path = "yolo26n-sem.onnx";
+
+    let args = predict_args(model_path, Some(Task::Semantic), true);
+
+    run_prediction(&args);
+
+    // Verify a results/ dir was created under runs/semantic/predict*/
+    let runs_dir = std::path::Path::new("runs").join("semantic");
+    assert!(
+        runs_dir.exists(),
+        "runs/semantic/ should exist after save_json=true for semantic task"
+    );
+    let results_png_exists = std::fs::read_dir(&runs_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .any(|predict_dir| predict_dir.path().join("results").join("bus.png").exists());
+    assert!(
+        results_png_exists,
+        "class-map PNG should be written to runs/semantic/predict*/results/bus.png"
+    );
+}
+
+#[test]
+#[ignore = "downloads a YOLO depth model and sample image"]
+fn test_run_prediction_e2e_depth() {
+    let model_path = "yolo26n-depth.onnx";
+
+    let args = predict_args(model_path, Some(Task::Depth), false);
+
+    run_prediction(&args);
+}
+
+#[test]
+#[ignore = "downloads a YOLO depth model and sample image; inspects the depth map"]
+fn test_depth_results_has_map() {
+    use ultralytics_inference::YOLOModel;
+
+    let model_path = "yolo26n-depth.onnx";
+
+    let mut model = YOLOModel::load(model_path).expect("depth model should load");
+    assert_eq!(model.task(), Task::Depth);
+    // `predict` takes a filesystem path, so fetch the sample image first.
+    let source = BUS;
+    let results = model.predict(source).expect("prediction should succeed");
+
+    let depth = results[0]
+        .depth
+        .as_ref()
+        .expect("depth task should populate results.depth");
+    // Depth map is at original image resolution and holds positive metric values.
+    assert_eq!(depth.data.shape().len(), 2);
+    let lo = depth.min_depth().expect("valid pixels expected");
+    let hi = depth.max_depth().expect("valid pixels expected");
+    assert!(lo > 0.0 && hi >= lo, "implausible depth range {lo}-{hi}");
+}
+
+#[test]
+#[ignore = "downloads a YOLO depth model and sample image; annotates the depth map"]
+fn test_depth_annotation_blends_over_image() {
+    use ultralytics_inference::YOLOModel;
+    use ultralytics_inference::annotate::{annotate_image, load_image};
+
+    let model_path = "yolo26n-depth.onnx";
+
+    // Pinned to CPU so the assertion is about the annotator, not the build's EPs.
+    let cfg = InferenceConfig::new().with_device(ultralytics_inference::Device::Cpu);
+    let mut model = YOLOModel::load_with_config(model_path, cfg).expect("depth model should load");
+    let source = BUS;
+    let results = model.predict(source).expect("prediction should succeed");
+
+    let image = load_image(source).expect("sample image should decode");
+    let annotated = annotate_image(&image, &results[0], None);
+    // The depth overlay is blended in place, so the annotation keeps the source size
+    // (a side-by-side composition would double the width).
+    assert_eq!(annotated.width(), image.width());
+    assert_eq!(annotated.height(), image.height());
+    // Blending at alpha 0.6 must actually change pixels.
+    assert_ne!(annotated.to_rgb8().into_raw(), image.to_rgb8().into_raw());
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+#[allow(clippy::cast_precision_loss)]
+#[ignore = "requires an NVIDIA GPU; downloads a YOLO depth model and sample image"]
+fn test_depth_cpu_matches_cuda() {
+    use ultralytics_inference::{Device, InferenceConfig, YOLOModel};
+
+    let model_path = "yolo26n-depth.onnx";
+    let source = BUS;
+
+    let depth_map = |device: Device| {
+        let cfg = InferenceConfig::new().with_device(device);
+        let mut model = YOLOModel::load_with_config(model_path, cfg).expect("model should load");
+        let results = model.predict(source).expect("prediction should succeed");
+        results[0]
+            .depth
+            .as_ref()
+            .expect("depth task should populate results.depth")
+            .data
+            .clone()
+    };
+
+    let cpu = depth_map(Device::Cpu);
+    let cuda = depth_map(Device::Cuda(0));
+    assert_eq!(cpu.shape(), cuda.shape());
+    // Both devices must letterbox identically, so only float/kernel noise remains. A
+    // geometry mismatch (padding or resampling) lands orders of magnitude above this.
+    let mean_abs = cpu
+        .iter()
+        .zip(cuda.iter())
+        .map(|(a, b)| (a - b).abs())
+        .sum::<f32>()
+        / cpu.len() as f32;
+    assert!(mean_abs < 0.05, "cpu vs cuda depth differs by {mean_abs} m");
+}
+
+// GPU inference tests. Gated on the `cuda` feature and `#[ignore]`d so they run
+// only on the self-hosted GPU CI (via `--include-ignored`), never on hosted
+// runners. They auto-download `yolo26n.onnx` and the bus.jpg sample.
+
+/// Loading on `Device::Cuda(0)` registers the CUDA execution provider and warms
+/// up without error (warmup runs inside `load_with_config`).
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires NVIDIA GPU; run on GPU CI"]
+fn test_cuda_model_loads_and_warms_up() {
+    let config = InferenceConfig::new().with_device(Device::Cuda(0));
+    let model = YOLOModel::load_with_config("yolo26n.onnx", config)
+        .expect("CUDA model should load and warm up");
+
+    let ep = model.execution_provider();
+    assert!(
+        ep.to_lowercase().contains("cuda"),
+        "expected the CUDA execution provider, got '{ep}'"
+    );
+}
+
+/// End-to-end CUDA inference on bus.jpg yields at least one detection.
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires NVIDIA GPU; run on GPU CI"]
+fn test_cuda_predict_bus_has_detections() {
+    let config = InferenceConfig::new().with_device(Device::Cuda(0));
+    let mut model =
+        YOLOModel::load_with_config("yolo26n.onnx", config).expect("CUDA model should load");
+    let image = BUS;
+
+    let results = model
+        .predict(image)
+        .expect("CUDA prediction should succeed");
+    let boxes = results
+        .first()
+        .and_then(|r| r.boxes.as_ref())
+        .expect("bus.jpg should produce boxes on CUDA");
+    assert!(
+        !boxes.is_empty(),
+        "expected at least one detection on bus.jpg"
+    );
+}
+
+/// CUDA and CPU inference produce equivalent detections on the same image.
+/// Both sides use the CPU letterbox preprocess (the CUDA model pins
+/// `with_cuda_preprocess(false)`, which the `cuda-preprocess` feature otherwise
+/// defaults on) so the comparison isolates the inference engines rather than the
+/// resize path; the fused GPU preprocess is covered by
+/// `test_cuda_preprocess_on_off_parity`.
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires NVIDIA GPU; run on GPU CI"]
+fn test_cuda_cpu_detection_parity() {
+    let image = BUS;
+
+    let mut cuda_model = YOLOModel::load_with_config(
+        "yolo26n.onnx",
+        InferenceConfig::new()
+            .with_device(Device::Cuda(0))
+            .with_cuda_preprocess(false),
+    )
+    .expect("CUDA model should load");
+    let cuda = cuda_model.predict(image).expect("CUDA prediction");
+    let cuda_boxes = cuda
+        .first()
+        .and_then(|r| r.boxes.as_ref())
+        .expect("CUDA boxes");
+
+    let mut cpu_model = YOLOModel::load_with_config(
+        "yolo26n.onnx",
+        InferenceConfig::new().with_device(Device::Cpu),
+    )
+    .expect("CPU model should load");
+    let cpu = cpu_model.predict(image).expect("CPU prediction");
+    let cpu_boxes = cpu
+        .first()
+        .and_then(|r| r.boxes.as_ref())
+        .expect("CPU boxes");
+
+    // Counts match within one box: NMS can keep/drop a borderline candidate
+    // differently under GPU vs CPU rounding.
+    let diff = cuda_boxes.len().abs_diff(cpu_boxes.len());
+    assert!(
+        diff <= 1,
+        "detection count mismatch: cuda={}, cpu={}",
+        cuda_boxes.len(),
+        cpu_boxes.len()
+    );
+
+    // Matched leading boxes (sorted by confidence) agree to a couple of pixels.
+    for (cb, pb) in cuda_boxes
+        .xyxy()
+        .outer_iter()
+        .zip(cpu_boxes.xyxy().outer_iter())
+    {
+        for (x, y) in cb.iter().zip(pb.iter()) {
+            let d = (x - y).abs();
+            assert!(d < 2.0, "box corner differs by {d}px between cuda and cpu");
+        }
+    }
+}
+
+/// The fused GPU preprocess (`cuda-preprocess`) and the CPU preprocess produce
+/// equivalent detections through the same CUDA execution provider.
+#[cfg(feature = "cuda-preprocess")]
+#[test]
+#[ignore = "requires NVIDIA GPU; run on GPU CI"]
+fn test_cuda_preprocess_on_off_parity() {
+    let mut fused = YOLOModel::load_with_config(
+        "yolo26n.onnx",
+        InferenceConfig::new()
+            .with_device(Device::Cuda(0))
+            .with_cuda_preprocess(true),
+    )
+    .expect("model with fused GPU preprocess should load");
+    let mut cpu_pre = YOLOModel::load_with_config(
+        "yolo26n.onnx",
+        InferenceConfig::new()
+            .with_device(Device::Cuda(0))
+            .with_cuda_preprocess(false),
+    )
+    .expect("model with CPU preprocess should load");
+    for image in [BUS, "assets/zidane.jpg", BUS] {
+        let fused_res = fused.predict(image).expect("fused prediction");
+        let fused_boxes = fused_res
+            .first()
+            .and_then(|r| r.boxes.as_ref())
+            .expect("fused boxes");
+        let cpu_pre_res = cpu_pre.predict(image).expect("cpu-preprocess prediction");
+        let cpu_pre_boxes = cpu_pre_res
+            .first()
+            .and_then(|r| r.boxes.as_ref())
+            .expect("cpu-preprocess boxes");
+
+        let diff = fused_boxes.len().abs_diff(cpu_pre_boxes.len());
+        assert!(
+            diff <= 1,
+            "detection count mismatch for {image}: fused={}, cpu-preprocess={}",
+            fused_boxes.len(),
+            cpu_pre_boxes.len()
+        );
+    }
+}
+
+/// Replaying a `TensorRT` graph must read the current frame, not the image bound at load time.
+#[cfg(feature = "cuda-preprocess")]
+#[test]
+#[ignore = "requires NVIDIA GPU; run on GPU CI"]
+fn test_tensorrt_input_changes_between_frames() {
+    let mut model = YOLOModel::load_with_config(
+        "yolo26n.onnx",
+        InferenceConfig::new()
+            .with_device(Device::TensorRt(0))
+            .with_cuda_preprocess(true),
+    )
+    .expect("TensorRT model should load");
+    let first = model.predict(BUS).expect("first prediction");
+    let other = model
+        .predict("assets/zidane.jpg")
+        .expect("second prediction");
+    let again = model.predict(BUS).expect("repeated prediction");
+    let boxes = |results: &[ultralytics_inference::Results]| {
+        results[0].boxes.as_ref().expect("boxes").xyxy().to_owned()
+    };
+    let (first, other, again) = (boxes(&first), boxes(&other), boxes(&again));
+    assert!(first.nrows() > 0 && other.nrows() > 0);
+    assert_ne!(first, other, "different frames must not reuse stale output");
+    assert_eq!(first.shape(), again.shape());
+    for (a, b) in first.iter().zip(again.iter()) {
+        assert!(
+            (a - b).abs() < 1.0,
+            "repeated frame changed by {}px",
+            (a - b).abs()
+        );
+    }
+}

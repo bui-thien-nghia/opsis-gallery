@@ -60,8 +60,13 @@ fn main() -> Result<()> {
     let db_path = PathBuf::from("data/gallery.db");
     let json_path = PathBuf::from("data/gallery.json");
 
+    set_ort_environment(env.clone())
+        .map_err(|e| anyhow::anyhow!("Failed to share ONNX Runtime environment with OAR: {e:?}"))?;
+    ultralytics_inference::set_ort_environment(env.clone()).map_err(|e| {
+        anyhow::anyhow!("Failed to share ONNX Runtime environment with Ultralytics: {e:?}")
+    })?;
+
     let mut yolo = YoloDetector::new(
-        &env,
         Path::new("models/obj_det/yolo11n-320-int8.onnx"),
         YOLO_CONF_THRESHOLD,
     )?;
@@ -259,9 +264,9 @@ mod tests {
     fn unified_ort_pipeline_runs_yolo_and_ocr_on_image() {
         let env = ort::init().with_telemetry(false).build().unwrap();
         set_ort_environment(env.clone()).unwrap();
+        ultralytics_inference::set_ort_environment(env.clone()).unwrap();
 
         let mut yolo = YoloDetector::new(
-            &env,
             Path::new("models/obj_det/yolo11n-320-int8.onnx"),
             YOLO_CONF_THRESHOLD,
         )

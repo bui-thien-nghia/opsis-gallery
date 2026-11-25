@@ -1,0 +1,1010 @@
+<!-- Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license -->
+
+<div align="center">
+  <p>
+    <a href="https://www.ultralytics.com/yolo/yolo27?utm_source=github&utm_medium=social&utm_campaign=yolo27-launch-2026&utm_content=banner" target="_blank">
+      <img width="100%" src="https://raw.githubusercontent.com/ultralytics/assets/main/yolov8/banner-yolov8.png" alt="Ultralytics YOLO banner"></a>
+  </p>
+
+[中文](https://docs.ultralytics.com/zh/inference) | [한국어](https://docs.ultralytics.com/ko/inference) | [日本語](https://docs.ultralytics.com/ja/inference) | [Русский](https://docs.ultralytics.com/ru/inference) | [Deutsch](https://docs.ultralytics.com/de/inference) | [Français](https://docs.ultralytics.com/fr/inference) | [Español](https://docs.ultralytics.com/es/inference) | [Português](https://docs.ultralytics.com/pt/inference) | [Türkçe](https://docs.ultralytics.com/tr/inference) | [Tiếng Việt](https://docs.ultralytics.com/vi/inference) | [العربية](https://docs.ultralytics.com/ar/inference) <br>
+
+</div>
+
+# 🦀 Ultralytics YOLO Rust Inference
+
+<div align="center">
+
+[English](README.md) | [简体中文](README.zh-CN.md)
+
+</div>
+
+<div align="center">
+
+[![Ultralytics Discord](https://img.shields.io/discord/1089800235347353640?logo=discord&logoColor=white&label=Discord&color=blue)](https://discord.com/invite/ultralytics)
+[![Ultralytics Forums](https://img.shields.io/discourse/users?server=https%3A%2F%2Fcommunity.ultralytics.com&logo=discourse&label=Forums&color=blue)](https://community.ultralytics.com)
+[![Ultralytics Reddit](https://img.shields.io/reddit/subreddit-subscribers/ultralytics?style=flat&logo=reddit&logoColor=white&label=Reddit&color=blue)](https://www.reddit.com/r/Ultralytics/)
+[![codecov](https://codecov.io/github/ultralytics/inference/branch/main/graph/badge.svg)](https://app.codecov.io/github/ultralytics/inference)
+[![CI](https://github.com/ultralytics/inference/actions/workflows/ci.yml/badge.svg)](https://github.com/ultralytics/inference/actions/workflows/ci.yml)
+[![arXiv](https://img.shields.io/badge/arXiv-2606.03748-b31b1b?logo=arxiv&logoColor=white)](https://arxiv.org/abs/2606.03748)
+
+[![Crates.io](https://img.shields.io/crates/v/ultralytics-inference?logo=rust&logoColor=white&label=crates.io&color=CE422B)](https://crates.io/crates/ultralytics-inference)
+[![docs.rs](https://img.shields.io/docsrs/ultralytics-inference?logo=docs.rs&logoColor=white&label=docs.rs&color=CE422B)](https://docs.rs/ultralytics-inference)
+[![Downloads](https://img.shields.io/crates/d/ultralytics-inference?logo=rust&logoColor=white&label=downloads&color=CE422B)](https://crates.io/crates/ultralytics-inference)
+[![MSRV](https://img.shields.io/crates/msrv/ultralytics-inference?logo=rust&logoColor=white&color=CE422B)](https://crates.io/crates/ultralytics-inference)
+[![License](https://img.shields.io/crates/l/ultralytics-inference?label=license&color=blue)](https://github.com/ultralytics/inference/blob/main/LICENSE)
+[![dependency status](https://deps.rs/repo/github/ultralytics/inference/status.svg)](https://deps.rs/repo/github/ultralytics/inference)
+
+</div>
+
+[Ultralytics](https://www.ultralytics.com) creates cutting-edge, state-of-the-art (SOTA) [YOLO models](https://www.ultralytics.com/yolo) built on years of foundational research in computer vision and AI. Constantly updated for performance and flexibility, our models are **fast**, **accurate**, and **easy to use**. They excel at [object detection](https://docs.ultralytics.com/tasks/detect), [instance segmentation](https://docs.ultralytics.com/tasks/segment), [semantic segmentation](https://docs.ultralytics.com/tasks/semantic), [depth estimation](https://docs.ultralytics.com/tasks/depth), [image classification](https://docs.ultralytics.com/tasks/classify), [pose estimation](https://docs.ultralytics.com/tasks/pose), and [oriented object detection](https://docs.ultralytics.com/tasks/obb) tasks, and can [track](https://docs.ultralytics.com/modes/track) detected objects across video frames.
+
+This is a high-performance YOLO inference library written in Rust, giving those models a fast, safe, and efficient interface on [ONNX Runtime](https://onnxruntime.ai). It runs every task above over images, video files, and webcam or RTSP streams, with an API designed to match the [Ultralytics Python package](https://github.com/ultralytics/ultralytics) and no Python or PyTorch runtime required.
+
+Find detailed documentation in the [Ultralytics Docs](https://docs.ultralytics.com/inference). Get support via [GitHub Issues](https://github.com/ultralytics/inference/issues/new/choose). Join discussions on [Discord](https://discord.com/invite/ultralytics), [Reddit](https://www.reddit.com/r/ultralytics/), and the [Ultralytics Community Forums](https://community.ultralytics.com)!
+
+Request an Enterprise License for commercial use at [Ultralytics Licensing](https://www.ultralytics.com/license).
+
+## ✨ Features
+
+- 🚀 **High Performance** - Pure Rust implementation with zero-cost abstractions
+- 🎯 **Ultralytics API Compatible** - `Results`, `Boxes`, `Masks`, `Keypoints`, `Probs`, `Obb`, `SemanticMask`, and `DepthMap` types matching the Python API shape
+- 🔧 **Multiple Backends** - CPU, XNNPACK, CUDA, TensorRT, CoreML, OpenVINO, and more via ONNX Runtime
+- 📦 **Dual Use** - Library for Rust projects + standalone CLI application
+- 🏷️ **Auto Metadata** - Automatically reads class names, task type, and input size from ONNX models
+- ⬇️ **Auto Download** - Downloads supported YOLO26, YOLO11, and YOLOv8 ONNX models (sizes: n/s/m/l/x) when not found locally
+- 🖼️ **Multiple Sources** - Images, directories, glob patterns, video files, webcams, and streams
+- 🎞️ **Object Tracking** - BoT-SORT, ByteTrack, OC-SORT, Deep OC-SORT, FastTrack and TrackTrack (the default) with camera motion compensation and ReID, matching Ultralytics (`track` feature), also in the browser
+- 🪶 **Lean Runtime** - No PyTorch, TensorFlow, or Python runtime required
+
+## ✨ Models
+
+<a href="https://docs.ultralytics.com/tasks" target="_blank">
+    <img width="100%" src="https://cdn.ul.run/i/c99d914c3958d0755b5a3d7204b6f24a.avif" alt="Ultralytics YOLO supported tasks">
+</a>
+<br>
+<br>
+
+This crate runs [YOLOv8](https://docs.ultralytics.com/models/yolov8), [YOLO11](https://docs.ultralytics.com/models/yolo11), and [YOLO26](https://docs.ultralytics.com/models/yolo26) ONNX models. They cover [Detection](https://docs.ultralytics.com/tasks/detect), [Segmentation](https://docs.ultralytics.com/tasks/segment), [Semantic Segmentation](https://docs.ultralytics.com/tasks/semantic), monocular [Depth Estimation](https://docs.ultralytics.com/tasks/depth) (YOLO26 only), [Classification](https://docs.ultralytics.com/tasks/classify), [Pose Estimation](https://docs.ultralytics.com/tasks/pose), and [OBB](https://docs.ultralytics.com/tasks/obb), pretrained on [COCO](https://docs.ultralytics.com/datasets/detect/coco) for detection, segmentation, and pose, on [Cityscapes](https://docs.ultralytics.com/datasets/semantic/cityscapes) for semantic segmentation, on [ImageNet](https://docs.ultralytics.com/datasets/classify/imagenet) for classification, and on [DOTA](https://docs.ultralytics.com/datasets/obb/dota-v2) for OBB. All [models](https://docs.ultralytics.com/models) download automatically from the latest Ultralytics [release](https://github.com/ultralytics/assets/releases) on first use.
+
+[RT-DETR](https://docs.ultralytics.com/models/rtdetr) detection models also run. There is no prebuilt RT-DETR ONNX to download, so export one yourself first (see below). After that it loads and runs like any other model here, on every device this crate supports.
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- [Rust 1.92+](https://rustup.rs/) (install via rustup)
+- A YOLO ONNX model (export from Ultralytics: `yolo export model=yolo26n.pt format=onnx`)
+
+### System dependencies
+
+Building from source (this includes `cargo install`) compiles native crates, so you need a C compiler. On Linux you additionally need `pkg-config` and the OpenSSL development headers, which the HTTPS model/asset downloader links against. macOS and Windows use their system TLS backends, so a C toolchain is all that is required.
+
+```bash
+# Debian/Ubuntu
+sudo apt install build-essential pkg-config libssl-dev
+
+# Fedora/RHEL
+sudo dnf install gcc gcc-c++ pkgconf-pkg-config openssl-devel
+
+# Arch
+sudo pacman -S base-devel openssl pkgconf
+
+# macOS (Xcode Command Line Tools provide the clang compiler)
+xcode-select --install
+
+# Windows: install the "Desktop development with C++" workload from
+# Visual Studio Build Tools (https://visualstudio.microsoft.com/downloads/)
+```
+
+### Installation
+
+```bash
+# Install CLI globally from crates.io
+cargo install ultralytics-inference
+
+# Install CLI globally with custom features
+# Minimal build (no default features)
+cargo install ultralytics-inference --no-default-features
+
+# Enable video support
+cargo install ultralytics-inference --features video
+
+# Enable multiple accelerators
+cargo install ultralytics-inference --features "cuda,tensorrt"
+```
+
+### Development install
+
+```bash
+# Install CLI directly from the git repository
+cargo install --git https://github.com/ultralytics/inference.git ultralytics-inference
+
+# Or clone, build, and install from source
+git clone https://github.com/ultralytics/inference.git
+cd inference
+cargo build --release
+
+# Install from local checkout
+cargo install --path . --locked
+```
+
+`cargo install` places binaries in Cargo's default bin directory:
+
+- macOS/Linux: `~/.cargo/bin`
+- Windows: `%USERPROFILE%\.cargo\bin`
+
+Ensure this directory is in your `PATH`, then run from anywhere:
+
+```bash
+ultralytics-inference help
+```
+
+### Export a YOLO Model to ONNX
+
+These examples use Ultralytics `>=8.4.142`. For detect, segment, pose, and OBB,
+`nms=None` (the default) exports raw one-to-many outputs and this library runs NMS;
+`nms=False` selects the NMS-free one-to-one head when available (e.g. YOLO26);
+`nms=True` embeds NMS in the ONNX graph. All three output layouts are supported.
+Use `nms=None` for semantic, depth, and classify. Existing compatible ONNX files
+continue to load without re-exporting.
+
+```bash
+pip install -U "ultralytics[export-base]>=8.4.142"
+
+# Using Ultralytics CLI (FP32, default)
+yolo export model=yolo26n.pt format=onnx
+
+# FP16 - ~50% smaller model
+yolo export model=yolo26n.pt format=onnx quantize=16
+
+# RT-DETR (detection only)
+yolo export model=rtdetr-l.pt format=onnx
+```
+
+```python
+# Or with Python
+from ultralytics import YOLO
+
+model = YOLO("yolo26n.pt")
+model.export(format="onnx")  # FP32 (default)
+model.export(format="onnx", quantize=16)  # FP16
+```
+
+```python
+# RT-DETR uses its own class
+from ultralytics import RTDETR
+
+RTDETR("rtdetr-l.pt").export(format="onnx")
+```
+
+> **Precision / quantization:** Ultralytics ≥8.4 uses a single `quantize`
+> argument instead of the deprecated `half=True` / `int8=True` flags. For ONNX
+> the supported values are `32`/`fp32` (FP32, the default), `16`/`fp16` (FP16),
+> and `8`/`int8` (INT8, requires a calibration dataset via `data=`). The old
+> flags still work but emit a deprecation warning. See the
+> [export docs](https://docs.ultralytics.com/modes/export) and the
+> [ONNX integration guide](https://docs.ultralytics.com/integrations/onnx).
+
+### Run Inference
+
+```bash
+# With defaults (auto-downloads yolo26n.onnx and sample images)
+ultralytics-inference predict
+
+# Select task: auto-downloads the nano model for that task
+ultralytics-inference predict --task segment  # downloads yolo26n-seg.onnx
+ultralytics-inference predict --task semantic # downloads yolo26n-sem.onnx (YOLO26 only)
+ultralytics-inference predict --task depth    # downloads yolo26n-depth.onnx (YOLO26 only)
+ultralytics-inference predict --task classify # downloads yolo26n-cls.onnx
+ultralytics-inference predict --task pose     # downloads yolo26n-pose.onnx
+ultralytics-inference predict --task obb      # downloads yolo26n-obb.onnx
+
+# With explicit model (task is read from model metadata)
+ultralytics-inference predict --model yolo26n.onnx --source image.jpg
+
+# Auto-download any supported size (n/s/m/l/x) across YOLO26, YOLO11, and YOLOv8
+ultralytics-inference predict --model yolo26l.onnx --source image.jpg
+ultralytics-inference predict --model yolo11x-seg.onnx --source image.jpg
+ultralytics-inference predict --model yolov8n.onnx --source image.jpg
+
+# RT-DETR, using the ONNX file you exported above
+ultralytics-inference predict --model rtdetr-l.onnx --source image.jpg
+
+# On a directory of images
+ultralytics-inference predict --model yolo26n.onnx --source assets/
+
+# With custom thresholds
+ultralytics-inference predict -m yolo26n.onnx -s image.jpg --conf 0.5 --iou 0.45
+
+# Filter by class IDs
+ultralytics-inference predict --model yolo26n.onnx --source image.jpg --classes 0
+ultralytics-inference predict --model yolo26n.onnx --source image.jpg --classes "0,1,2"
+
+# With visualization and custom image size
+ultralytics-inference predict --model yolo26n.onnx --source video.mp4 --show --imgsz 1280
+
+# Tiled inference for large images, small objects and video frames (20% window overlap, results merged)
+ultralytics-inference predict --model yolo26n.onnx --source aerial.jpg --tile 640
+
+# Read scene text: YOLO26-Text finds the words and PaddleOCR reads them (auto-downloads yolo26n-text.onnx and the OCR models)
+ultralytics-inference predict --ocr --source sign.jpg
+
+# Read Korean, Cyrillic, Arabic and other scripts with a PaddleOCR language model
+ultralytics-inference predict --ocr korean_PP-OCRv5_mobile_rec --source sign.jpg
+
+# Save individual frames for video input
+ultralytics-inference predict --model yolo26n.onnx --source video.mp4 --save-frames
+
+# Rectangular inference
+ultralytics-inference predict --model yolo26n.onnx --source image.jpg --rect
+
+# Semantic segmentation: write per-image PNG class maps to runs/semantic/predictN/results/
+ultralytics-inference predict --task semantic --source cityscapes/ --save-json
+
+# Depth estimation: blend the colorized depth over the image into runs/depth/predictN/
+ultralytics-inference predict --task depth --source image.jpg
+```
+
+### Example Output
+
+```bash
+ultralytics-inference predict
+```
+
+```text
+WARNING ⚠️ 'model' argument is missing. Using default '--model=yolo26n.onnx'.
+WARNING ⚠️ 'source' argument is missing. Using default images: https://ultralytics.com/images/bus.jpg, https://ultralytics.com/images/zidane.jpg
+Ultralytics Inference 0.0.61 🚀 Rust ONNX FP32 CPU
+Using ONNX Runtime CPUExecutionProvider
+YOLO26n summary: 80 classes, imgsz=(640, 640)
+
+image 1/2 /home/ultralytics/inference/bus.jpg: 640x480 4 persons, 1 bus, 36.4ms
+image 2/2 /home/ultralytics/inference/zidane.jpg: 384x640 2 persons, 1 tie, 28.6ms
+Speed: 1.5ms preprocess, 32.5ms inference, 0.5ms postprocess per image at shape (1, 3, 384, 640)
+Results saved to runs/detect/predict
+💡 Learn more at https://docs.ultralytics.com/modes/predict
+```
+
+**With `--task` (auto-downloads the matching nano model):**
+
+```bash
+ultralytics-inference predict --task segment
+```
+
+```text
+WARNING ⚠️ 'model' argument is missing. Using default '--model=yolo26n-seg.onnx'.
+WARNING ⚠️ 'source' argument is missing. Using default images: https://ultralytics.com/images/bus.jpg, https://ultralytics.com/images/zidane.jpg
+Ultralytics Inference 0.0.61 🚀 Rust ONNX FP32 CPU
+Using ONNX Runtime CPUExecutionProvider
+YOLO26n-seg summary: 80 classes, imgsz=(640, 640)
+
+image 1/2 /home/ultralytics/inference/bus.jpg: 640x480 4 persons, 1 bus, 48.2ms
+image 2/2 /home/ultralytics/inference/zidane.jpg: 384x640 2 persons, 1 tie, 38.1ms
+Speed: 1.6ms preprocess, 44.3ms inference, 1.2ms postprocess per image at shape (1, 3, 384, 640)
+Results saved to runs/segment/predict
+💡 Learn more at https://docs.ultralytics.com/modes/predict
+```
+
+## 📚 Usage
+
+### As a CLI Tool
+
+```bash
+# Show help
+ultralytics-inference help
+
+# Show version
+ultralytics-inference version
+
+# Run inference
+ultralytics-inference predict --model yolo26n.onnx --source image.jpg
+
+# Track objects in a video (`track` and `video` features)
+ultralytics-inference track --model yolo26n.onnx --source video.mp4 --tracker tracktrack.yaml
+```
+
+`track` takes every `predict` option plus `--tracker`, a tracker name (`botsort`, `bytetrack`, `ocsort`, `deepocsort`,
+`fasttrack`, `tracktrack`, with or without `.yaml`) or a YAML file with the keys of the [Ultralytics tracker
+configs](https://github.com/ultralytics/ultralytics/tree/main/ultralytics/cfg/trackers). Like Ultralytics it defaults to
+`tracktrack.yaml`, `--conf 0.1` and saving to `runs/<task>/track`. `with_reid: True` downloads `yolo26n-reid.onnx` for
+`model: auto`. Of the `gmc_method` values, `sparseOptFlow` and `none` are supported.
+
+`--help` and `--version` are also supported as standard flag aliases.
+
+**CLI Options:**
+
+| Option                   | Short | Description                                                                                                                                                                                                                  | Default                                                                      |
+| ------------------------ | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `--model`                | `-m`  | Path to ONNX model file; auto-downloaded if a known YOLOv8/YOLO11/YOLO26 name                                                                                                                                                | `yolo26n.onnx`                                                               |
+| `--task`                 |       | Task type (`detect`, `segment`, `semantic`\*, `depth`\*, `classify`, `pose`, `obb`); selects nano model when `--model` is omitted                                                                                            | `detect`                                                                     |
+| `--source`               | `-s`  | Input source (image, directory, glob, video, webcam index, or URL)                                                                                                                                                           | Task-dependent Ultralytics URL assets                                        |
+| `--conf`                 |       | Confidence threshold                                                                                                                                                                                                         | `0.25` (`0.1` for `track`)                                                   |
+| `--iou`                  |       | IoU threshold for NMS                                                                                                                                                                                                        | `0.5`                                                                        |
+| `--max-det`              |       | Maximum number of detections                                                                                                                                                                                                 | `300`                                                                        |
+| `--imgsz`                |       | Inference image size                                                                                                                                                                                                         | model metadata                                                               |
+| `--rect [<BOOL>]`        |       | Enable rectangular inference (minimal padding)                                                                                                                                                                               | `true`                                                                       |
+| `--tile [<TILE>]`        |       | Tile size for overlapping-window inference; bare `--tile` uses `--imgsz`                                                                                                                                                     | off                                                                          |
+| `--tile-overlap`         |       | Fraction of each tile shared with its neighbor                                                                                                                                                                               | `0.2`                                                                        |
+| `--retina-masks`         |       | Build segmentation masks at the original image size instead of the inference size                                                                                                                                            | `false`                                                                      |
+| `--ocr [<RECOGNIZER>]`   |       | Read the text in each box, oriented box or mask with PaddleOCR; bare `--ocr` uses PP-OCRv6, or name a PP-OCRv5 language model; without `--model` this runs `yolo26n-text.onnx`                                               | off                                                                          |
+| `--batch`                |       | Batch size for inference                                                                                                                                                                                                     | `1`                                                                          |
+| `--quantize`             |       | Inference precision: `8`, `16`, `32`, `int8`, `fp16`, `fp32`, `w8a8`, `w16a16`, `w32a32`, `w8a16`, or `w8a32`                                                                                                                | Model precision                                                              |
+| `--save [<BOOL>]`        |       | Save annotated results to runs/\<task\>/predict                                                                                                                                                                              | `true`                                                                       |
+| `--save-frames`          |       | Save individual frames for video input (instead of video file)                                                                                                                                                               | `false`                                                                      |
+| `--save-json`            |       | Save semantic segmentation class-map PNGs for external evaluation                                                                                                                                                            | `false`                                                                      |
+| `--show`                 |       | Display results in a window                                                                                                                                                                                                  | `false`                                                                      |
+| `--show-labels [<BOOL>]` |       | Show class names in box labels                                                                                                                                                                                               | `true`                                                                       |
+| `--show-conf [<BOOL>]`   |       | Show confidences in box labels                                                                                                                                                                                               | `true`                                                                       |
+| `--show-boxes [<BOOL>]`  |       | Draw boxes and their labels                                                                                                                                                                                                  | `true`                                                                       |
+| `--line-width`           |       | Box line width in pixels, which also sizes labels                                                                                                                                                                            | from image size                                                              |
+| `--device`               |       | Device string, e.g. cpu, cuda:0, coreml, directml:0, intel:cpu, intel:gpu, intel:npu, tensorrt:0, rocm:0, migraphx:0, xnnpack; each needs its feature, and a requested device that is not built or fails to load is an error | auto (best available provider; `cpu` when no accelerator feature is enabled) |
+| `--verbose [<BOOL>]`     |       | Show verbose output                                                                                                                                                                                                          | `true`                                                                       |
+| `--classes`              |       | Filter by class IDs, e.g. `0` or `"0,1,2"` or `"[0, 1, 2]"`                                                                                                                                                                  | all classes                                                                  |
+| `--tracker`              |       | `track` only: tracker name or YAML file                                                                                                                                                                                      | `tracktrack.yaml`                                                            |
+
+`[<BOOL>]` marks a flag whose value is optional: passing it bare (`--rect`) sets it to `true`, and an explicit `--rect false` or `--rect=false` turns it off.
+
+The legacy `--half` flag remains accepted for backward compatibility, maps to `--quantize 16`, and emits the same deprecation warning as Ultralytics Python. An explicit `--quantize` value wins.
+
+On CPU, ONNX Runtime widens an FP16 ONNX graph to FP32 weights while it builds the inference session, so an FP16 export runs at FP32 speed. The compact FP16 source file is never modified.
+
+**Task and Model Resolution:**
+
+| Invocation                                        | Model used             | Notes                                                                |
+| ------------------------------------------------- | ---------------------- | -------------------------------------------------------------------- |
+| `predict`                                         | `yolo26n.onnx`         | Default detect model, auto-downloaded                                |
+| `predict --task segment`                          | `yolo26n-seg.onnx`     | Nano seg model, auto-downloaded                                      |
+| `predict --task semantic`                         | `yolo26n-sem.onnx`\*   | Nano semantic segmentation model, auto-downloaded (YOLO26 only)      |
+| `predict --task depth`                            | `yolo26n-depth.onnx`\* | Nano depth estimation model, auto-downloaded (YOLO26 only)           |
+| `predict --task classify`                         | `yolo26n-cls.onnx`     | Nano classify model, auto-downloaded                                 |
+| `predict --task pose`                             | `yolo26n-pose.onnx`    | Nano pose model, auto-downloaded                                     |
+| `predict --task obb`                              | `yolo26n-obb.onnx`     | Nano OBB model, auto-downloaded                                      |
+| `predict --ocr`                                   | `yolo26n-text.onnx`\*  | Nano YOLO26-Text detector plus the PaddleOCR models, auto-downloaded |
+| `predict --model yolo26l-seg.onnx`                | `yolo26l-seg.onnx`     | Task read from model metadata                                        |
+| `predict --task segment --model yolo26l-seg.onnx` | `yolo26l-seg.onnx`     | `--task` matches metadata, proceeds normally                         |
+| `predict --task segment --model yolo26n.onnx`     | error                  | `--task` conflicts with model metadata (`detect`), exits with error  |
+
+\* `semantic` (semantic segmentation), `depth` (depth estimation) and the `-text` scene text detectors are YOLO26-only.
+
+**Auto-downloadable models:**
+
+YOLOv8, YOLO11, and YOLO26 ONNX models in sizes **n / s / m / l / x** are supported for auto-download across the standard task variants. YOLO26 also includes `-sem` for semantic segmentation, `-depth` for depth estimation, `-reid` for tracking appearance features and `-text` for the OBB text detectors that `--ocr` reads with the PaddleOCR `PP-OCRv6_medium_rec.onnx` recognizer, its PP-OCRv5 language models and the `PP-LCNet_x0_25_textline_ori.onnx` orientation classifier (Apache-2.0):
+
+| Family | Variants                                                                                                                    |
+| ------ | --------------------------------------------------------------------------------------------------------------------------- |
+| YOLO26 | `yolo26{n,s,m,l,x}.onnx`, `yolo26{n,s,m,l,x}-seg.onnx`, `-sem`\*, `-depth`\*, `-cls`, `-pose`, `-obb`, `-text`\*, `-reid`\* |
+| YOLO11 | `yolo11{n,s,m,l,x}.onnx`, `yolo11{n,s,m,l,x}-seg.onnx`, `-cls`, `-pose`, `-obb`                                             |
+| YOLOv8 | `yolov8{n,s,m,l,x}.onnx`, `yolov8{n,s,m,l,x}-seg.onnx`, `-cls`, `-pose`, `-obb`                                             |
+
+\* `-sem` (semantic segmentation), `-depth` (depth estimation), `-text` (scene text) and `-reid` (tracking appearance) are YOLO26-only.
+
+**Source Options:**
+
+| Source Type | Example Input                   | Description                       |
+| ----------- | ------------------------------- | --------------------------------- |
+| Image       | `image.jpg`                     | Single image file                 |
+| Directory   | `images/`                       | Directory of images               |
+| Glob        | `images/*.jpg`                  | Glob pattern for images           |
+| Video       | `video.mp4`                     | Video file                        |
+| Webcam      | `0`,`1`                         | Webcam index (0 = default webcam) |
+| URL         | `https://example.com/image.jpg` | Remote image URL                  |
+
+Supported image formats: `.bmp`, `.dng`, `.gif`, `.jp2`, `.jpeg`, `.jpg`, `.mpo`, `.png`, `.tif`, `.tiff` and `.webp`.
+
+Supported video formats (`video` feature): `.asf`, `.avi`, `.flv`, `.m4v`, `.mkv`, `.mov`, `.mp4`, `.mpeg`, `.mpg`, `.ts`, `.wmv` and `.webm`.
+
+### As a Rust Library
+
+Add to your `Cargo.toml` (choose one):
+
+```toml
+# Stable release from crates.io
+[dependencies]
+ultralytics-inference = "0.0.61"
+```
+
+```toml
+# Development version (latest unreleased code from GitHub)
+[dependencies]
+ultralytics-inference = { git = "https://github.com/ultralytics/inference.git" }
+```
+
+**Basic Usage:**
+
+```rust
+use ultralytics_inference::YOLOModel;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load model - metadata (classes, task, imgsz) is read automatically
+    let mut model = YOLOModel::load("yolo26n.onnx")?;
+
+    // Run inference
+    let results = model.predict("image.jpg")?;
+
+    // Process results
+    for result in &results {
+        if let Some(ref boxes) = result.boxes {
+            println!("Found {} detections", boxes.len());
+            for i in 0..boxes.len() {
+                let cls = boxes.cls()[i] as usize;
+                let conf = boxes.conf()[i];
+                let name = result.names.get(&cls).map(|s| s.as_str()).unwrap_or("unknown");
+                println!("  {} {:.2}", name, conf);
+            }
+        }
+    }
+
+    Ok(())
+}
+```
+
+**With Custom Configuration:**
+
+```rust
+use ultralytics_inference::{YOLOModel, InferenceConfig};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = InferenceConfig::new()
+        .with_confidence(0.5)
+        .with_iou(0.45)
+        .with_max_det(300);
+
+    let mut model = YOLOModel::load_with_config("yolo26n.onnx", config)?;
+    let results = model.predict("image.jpg")?;
+
+    Ok(())
+}
+```
+
+**Accessing Detection Data:**
+
+```rust
+if let Some(ref boxes) = result.boxes {
+    // Bounding boxes in different formats
+    let xyxy = boxes.xyxy();      // [x1, y1, x2, y2]
+    let xywh = boxes.xywh();      // [x_center, y_center, width, height]
+    let xyxyn = boxes.xyxyn();    // Normalized [0-1]
+    let xywhn = boxes.xywhn();    // Normalized [0-1]
+
+    // Confidence scores and class IDs
+    let conf = boxes.conf();      // Confidence scores
+    let cls = boxes.cls();        // Class IDs
+}
+
+// Segmentation mask outlines, like Ultralytics masks.xy
+if let Some(ref masks) = result.masks {
+    let xy = masks.xy();          // One (points, 2) array per mask, in pixels
+    let xyn = masks.xyn();        // Normalized [0-1]
+}
+```
+
+**Selecting a Device:**
+
+```rust
+use ultralytics_inference::{Device, InferenceConfig, YOLOModel};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Select a device (e.g., CUDA, CoreML, CPU)
+    let device = Device::Cuda(0);
+
+    // Configure the model to use this device
+    let config = InferenceConfig::new().with_device(device);
+
+    let mut model = YOLOModel::load_with_config("yolo26n.onnx", config)?;
+    let results = model.predict("image.jpg")?;
+
+    Ok(())
+}
+```
+
+**Class Colors:**
+
+Boxes, masks and labels use the Ultralytics palette, or a model's own class colors when its export carries `colors`
+metadata (`#rrggbb` per class, e.g. set in Ultralytics Platform). They arrive in `Results::colors`.
+
+**Depth Visualization:**
+
+Depth results are rendered by blending the colorized depth map over the source image at
+`alpha = 0.6`, using the `jet` colormap and `disparity` normalization. This matches the
+Ultralytics Python `Annotator.depth_map` default, so the CLI needs no depth flags and
+`--save` produces the same image Python's `plot()` does.
+
+Set the colormap, normalization, and overlay opacity explicitly through the library
+(`Jet` + `Disparity` + `0.6` below match the CLI default; swap in any other variant):
+
+```rust
+use ultralytics_inference::YOLOModel;
+use ultralytics_inference::annotate::{annotate_image_with, load_image};
+use ultralytics_inference::visualizer::color::{Colormap, DepthViz};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut model = YOLOModel::load("yolo26n-depth.onnx")?;
+    let results = model.predict("image.jpg")?;
+
+    // Per-pixel depth in meters, at the original image resolution
+    if let Some(depth) = &results[0].depth {
+        println!("{:?} {:?}m", depth.data.shape(), depth.min_depth());
+    }
+
+    // Colormap: inferno / jet / spectral / gray. Normalization: disparity / metric.
+    // Opacity: 0.6 blends over the image (CLI default), 1.0 is the full colorized map.
+    let image = load_image("image.jpg")?;
+    let annotated = annotate_image_with(&image, &results[0], None, Colormap::Jet, DepthViz::Disparity, 0.6);
+    annotated.save("depth.jpg")?;
+
+    Ok(())
+}
+```
+
+`disparity` colors `1/d` instead of `d`, clipped to the 2nd-98th percentile. Inverting the
+depth spends the color range on nearby detail rather than the distant background, so near
+objects read warm and a few stray pixels cannot wash out the rest. `metric` colors depth
+directly, linearly between its min and max.
+
+**Tiled Inference:**
+
+Large images with small objects can be split into overlapping windows and merged back into one result, the same as the Python `tile` argument. Set `tile` in the config like `conf` or `imgsz` and every `predict` call is tiled. Windows overlap by 20% by default (`with_tile_overlap`, CLI `--tile-overlap`), boxes are mapped back to the source image, and duplicates are removed per class. With a dynamic batch export, `with_batch` (CLI `--batch`) runs several windows in one inference call. Detection, segmentation, semantic segmentation, depth, classification, pose and OBB models are all supported:
+
+```rust
+use ultralytics_inference::{InferenceConfig, YOLOModel};
+
+// 640 pixel windows; with_tile(0) uses the inference size
+let config = InferenceConfig::new().with_tile(640);
+let mut model = YOLOModel::load_with_config("yolo26n.onnx", config)?;
+let results = model.predict("aerial.jpg")?;
+```
+
+**Scene Text OCR:**
+
+YOLO26-Text detectors find words as oriented boxes, and `TextRecognizer` reads them with PaddleOCR PP-OCRv6, the same as the Python `solutions.OCR` with `recognizer="paddleocr"`. Boxes of detection models and masks of segmentation models work too, a mask being read from the minimum-area rectangle around its outline, which it keeps as its polygon. Each crop is turned upright, text the orientation classifier finds upside down is read again turned around, and the texts come back in reading order. The recognizer runs on the detector's device, or on the CPU for a native OpenVINO IR detector built without the `openvino` feature:
+
+```rust
+use ultralytics_inference::YOLOModel;
+use ultralytics_inference::ocr::{DEFAULT_ORIENTATION, DEFAULT_RECOGNIZER, TextRecognizer};
+
+let mut detector = YOLOModel::load("yolo26n-text.onnx")?;
+let mut ocr = TextRecognizer::new(&detector, DEFAULT_RECOGNIZER, DEFAULT_ORIENTATION)?;
+let image = image::open("sign.jpg")?;
+let result = detector.predict_image(&image, "sign.jpg".into())?.remove(0);
+for text in ocr.read(&image, &result)? {
+    println!("{} {:.2}", text.text, text.confidence);
+}
+```
+
+PP-OCRv6 reads Chinese, Japanese and Latin-script languages. For other scripts, pass a PaddleOCR PP-OCRv5 language model as the recognizer, the same as Python `recognizer="korean_PP-OCRv5_mobile_rec"`, with `--ocr korean_PP-OCRv5_mobile_rec` or `TextRecognizer::new(&detector, "korean_PP-OCRv5_mobile_rec", DEFAULT_ORIENTATION)`. It downloads on first use. Pick the model for your text, since OCR does not detect the language:
+
+| Recognizer                       | Script and example languages                                        |
+| -------------------------------- | ------------------------------------------------------------------- |
+| `korean_PP-OCRv5_mobile_rec`     | Korean (Hangul) and Latin letters                                   |
+| `cyrillic_PP-OCRv5_mobile_rec`   | Cyrillic: Russian, Ukrainian, Bulgarian, Serbian, Kazakh, Mongolian |
+| `eslav_PP-OCRv5_mobile_rec`      | East Slavic Cyrillic: Russian, Ukrainian, Belarusian                |
+| `arabic_PP-OCRv5_mobile_rec`     | Arabic script: Arabic, Persian, Urdu, Uyghur                        |
+| `devanagari_PP-OCRv5_mobile_rec` | Devanagari: Hindi, Marathi, Nepali                                  |
+| `th_PP-OCRv5_mobile_rec`         | Thai                                                                |
+| `el_PP-OCRv5_mobile_rec`         | Greek, including accented letters and final `ς`                     |
+| `ta_PP-OCRv5_mobile_rec`         | Tamil                                                               |
+| `te_PP-OCRv5_mobile_rec`         | Telugu                                                              |
+| `latin_PP-OCRv5_mobile_rec`      | Latin-script languages, in a smaller and faster model than PP-OCRv6 |
+| `en_PP-OCRv5_mobile_rec`         | English, in a smaller and faster model than PP-OCRv6                |
+
+`predict --ocr` and `annotate_texts` draw the texts like Python, and `--line-width`, `--show-labels` and `--show-conf` apply to them too.
+
+**Drawing:**
+
+`annotate_image_with_options` draws like Ultralytics `Results.plot` and takes its options: `line_width`, `show_boxes`,
+`show_labels` and `show_conf` work like the CLI flags of the same name, and the keypoint options style pose. A
+17-keypoint (COCO-Pose) model draws the human skeleton, any other layout draws one palette color per keypoint and no lines, and `skeleton`
+connects the keypoints of a custom model, each line in the color of its first keypoint:
+
+```rust
+use ultralytics_inference::annotate::{AnnotateOptions, annotate_image_with_options};
+
+let options = AnnotateOptions {
+    line_width: Some(3),
+    show_conf: false,
+    kpt_radius: 5,
+    kpt_conf: 0.25,
+    skeleton: Some(vec![[0, 1], [1, 2]]),
+    ..Default::default()
+};
+let annotated = annotate_image_with_options(&image, &results[0], &options);
+```
+
+**Tracking** (`track` feature):
+
+```rust
+use ultralytics_inference::YOLOModel;
+
+let mut model = YOLOModel::load("yolo26n.onnx")?;
+for frame in ["frame1.jpg", "frame2.jpg"] {
+    let results = model.track(frame, "tracktrack.yaml")?; // tracks carry over between calls
+    println!("{:?}", results[0].boxes.as_ref().and_then(|b| b.id()));
+}
+```
+
+Like Ultralytics `model.track(persist=True)`, the tracker lives in the model until the tracker changes or
+`model.reset_tracker()` starts a new video. `model.track_image` takes decoded frames, such as those of a
+`SourceIterator` over a video (see the [track example](examples/track.rs)), and `Tracker` tracks your own `Results`.
+
+For runnable programs you can copy and adapt, see the [examples](examples/README.md) directory.
+
+## 🗂️ Project Structure
+
+```text
+inference/
+├── src/
+│   ├── lib.rs              # Library entry point and public exports
+│   ├── main.rs             # CLI application
+│   ├── model.rs            # YOLOModel - ONNX session and inference
+│   ├── ocr.rs              # Scene text OCR (YOLO26-Text + PaddleOCR)
+│   ├── openvino.rs         # Native OpenVINO IR runtime (openvino-native feature)
+│   ├── results.rs          # Results, Boxes, Masks, Keypoints, Probs, Obb, SemanticMask, DepthMap
+│   ├── preprocessing.rs    # Image preprocessing (letterbox, stretch for RT-DETR and depth, normalize, SIMD)
+│   ├── postprocessing.rs   # Post-processing for all tasks (NMS/decode for detection, argmax for semantic, resize for depth)
+│   ├── metadata.rs         # ONNX model metadata parsing
+│   ├── source.rs           # Input source handling (images, video, webcam)
+│   ├── task.rs             # Task enum (Detect, Segment, Semantic, Depth, Classify, Pose, Obb)
+│   ├── inference.rs        # InferenceConfig
+│   ├── batch.rs            # Batch processing pipeline
+│   ├── device.rs           # Device enum (CPU, CUDA, CoreML, etc.)
+│   ├── cuda_inference.rs   # Fused CUDA preprocess kernel (cuda-preprocess feature)
+│   ├── parallel.rs         # Rayon parallelism shims (sequential on wasm)
+│   ├── download.rs         # Model and asset downloading
+│   ├── annotate.rs         # Image annotation (bounding boxes, instance masks, keypoints, semantic overlay, depth colormap)
+│   ├── io.rs               # Result saving (images, videos)
+│   ├── logging.rs          # Logging macros
+│   ├── error.rs            # Error types
+│   ├── utils.rs            # Utility functions (NMS, IoU)
+│   ├── cli/                # CLI module
+│   │   ├── mod.rs          # CLI module exports
+│   │   ├── args.rs         # CLI argument parsing
+│   │   └── predict.rs      # Predict and track command implementation
+│   ├── tracker/            # Object tracking (track feature), laid out like ultralytics/trackers
+│   │   ├── mod.rs          # Tracker and the shared track state
+│   │   ├── bot_sort.rs     # BoT-SORT appearance matching
+│   │   ├── byte_tracker.rs # ByteTrack, which the others build on
+│   │   ├── oc_sort.rs      # OC-SORT
+│   │   ├── deep_oc_sort.rs # Deep OC-SORT
+│   │   ├── fast_tracker.rs # FastTrack
+│   │   ├── track_tracker.rs # TrackTrack
+│   │   ├── config.rs       # TrackerType, TrackerConfig and YAML configs
+│   │   ├── kalman_filter.rs # Kalman filter
+│   │   ├── matching.rs     # Cost matrices and LAPJV assignment
+│   │   ├── gmc.rs          # Sparse optical flow camera motion compensation
+│   │   └── reid.rs         # ReID appearance features
+│   └── visualizer/         # Real-time visualization (minifb)
+├── tests/
+│   ├── integration_test.rs # Integration tests
+│   └── README.md           # Testing guide
+├── examples/               # Runnable library examples
+│   ├── basic.rs            # Load a model, run inference, print detections
+│   ├── config.rs           # Set confidence, IoU, image size, and device
+│   ├── tasks.rs            # Summary for every task, plus raw arrays for segment, semantic, depth
+│   ├── annotate.rs         # Draw boxes and labels, save the annotated image
+│   ├── track.rs            # Track objects across video frames
+│   └── README.md           # Examples guide
+├── assets/                 # Test images
+│   ├── boats.jpg
+│   ├── bus.jpg
+│   └── zidane.jpg
+├── crates/web/             # ultralytics-inference-web: wasm32 WebGPU bindings
+├── web/                    # @ultralytics/yolo npm package (TypeScript wrapper)
+├── docs/                   # Additional guides
+│   ├── CUDA.md             # NVIDIA CUDA and TensorRT setup
+│   ├── DGX.md              # DGX Spark (aarch64) setup and benchmarks
+│   └── OPENVINO.md         # Native OpenVINO IR models
+├── Cargo.toml              # Rust dependencies and features
+├── LICENSE                 # AGPL-3.0 License
+├── README.md               # English README
+└── README.zh-CN.md         # Simplified Chinese README
+```
+
+## ⚡ Hardware Acceleration
+
+Enable hardware acceleration by adding features to your build:
+
+```bash
+# NVIDIA GPU (CUDA)
+cargo build --release --features cuda
+
+# NVIDIA TensorRT
+cargo build --release --features tensorrt
+
+# NVIDIA GPU preprocessing + zero-copy TensorRT input (fastest; needs CUDA toolkit)
+cargo build --release --features cuda-preprocess
+
+# Apple CoreML (macOS/iOS)
+cargo build --release --features coreml
+
+# Intel OpenVINO (select the target hardware with intel:cpu, intel:gpu, or intel:npu)
+cargo build --release --features openvino
+ultralytics-inference predict --source bus.jpg --device intel:gpu
+
+# Native OpenVINO IR (.xml) models, run by the OpenVINO runtime without ONNX Runtime
+cargo build --release --features openvino-native
+
+# Multiple features
+cargo build --release --features "cuda,tensorrt"
+```
+
+> NVIDIA setup, requirements, and the GPU preprocessing fast path are documented in [`docs/CUDA.md`](docs/CUDA.md).
+
+Each accelerator feature links a prebuilt ONNX Runtime containing that provider. Not every combination is published, and asking for one that is not stops the build with `no builds available that satisfy the requested feature set`. To take the closest available build instead of an error, enable `lax-feature-matching` on `ort`:
+
+```toml
+[dependencies]
+ultralytics-inference = { version = "0.0.61", features = ["coreml", "xnnpack"] }
+ort = { version = "=2.0.0-rc.15", features = ["lax-feature-matching"] }
+```
+
+Providers missing from the chosen build are then absent at runtime: the default device falls back to CPU, and a `--device` that needs one stops with an error. On `aarch64-unknown-linux-gnu` a CUDA, TensorRT and NVRTX build is published for Jetson, Grace Hopper and DGX Spark; other GPU features there still hit this, see [`docs/DGX.md`](docs/DGX.md).
+
+> The CUDA and TensorRT binaries are built against CUDA 13, and no CUDA 12 build is published. To run them on CUDA 12, compile ONNX Runtime yourself and link it with `ORT_LIB_PATH`.
+
+> `openvino` uses a prebuilt ONNX Runtime with the OpenVINO provider (Linux x64 and Windows x64). The provider needs the OpenVINO runtime installed on the machine, and a `--device intel:*` run stops with an install hint when it is missing.
+
+**OpenVINO IR models:** with the `openvino-native` feature (it can be combined with `openvino`), `--model` also takes a native OpenVINO export, the `.xml` file or the folder from `yolo export format=openvino`, and runs it through the OpenVINO runtime instead of ONNX Runtime. Every task (detect, segment, semantic, depth, classify, pose, obb) runs on `intel:cpu`, `intel:gpu` and `intel:npu`, and from Rust with `YOLOModel::load("yolo26n_openvino_model")`. Building needs no OpenVINO install, the runtime is loaded when the first model opens. Setup and details are in [`docs/OPENVINO.md`](docs/OPENVINO.md).
+
+```bash
+yolo export model=yolo26n.pt format=openvino # FP32, add quantize=16, quantize=8, dynamic=True or batch=4
+ultralytics-inference predict --model yolo26n_openvino_model --source bus.jpg --device intel:gpu
+```
+
+**Available Features:**
+
+Default features (enabled unless `--no-default-features` is passed): `annotate`, `visualize`.
+
+| Feature           | Description                                                                                           |
+| ----------------- | ----------------------------------------------------------------------------------------------------- |
+| `annotate`        | Image annotation for `--save` (default)                                                               |
+| `visualize`       | Real-time window display for `--show` (default)                                                       |
+| `video`           | Video file decoding/encoding (requires FFmpeg)                                                        |
+| `track`           | Object tracking: the `track` command and `Tracker`                                                    |
+| `cuda`            | NVIDIA CUDA support                                                                                   |
+| `tensorrt`        | NVIDIA TensorRT optimization (includes `cuda`)                                                        |
+| `cuda-preprocess` | GPU preprocessing + zero-copy TensorRT input (needs CUDA toolkit; see [`docs/CUDA.md`](docs/CUDA.md)) |
+| `coreml`          | Apple CoreML (macOS/iOS)                                                                              |
+| `openvino`        | Intel OpenVINO (Linux and Windows x64)                                                                |
+| `openvino-native` | Loads native OpenVINO IR (`.xml`) models, see [`docs/OPENVINO.md`](docs/OPENVINO.md)                  |
+| `onednn`          | Intel oneDNN                                                                                          |
+| `rocm`            | AMD ROCm (needs your own ONNX Runtime build, none is published)                                       |
+| `migraphx`        | AMD MIGraphX (Linux x64, `--device migraphx:0`)                                                       |
+| `directml`        | DirectML (Windows)                                                                                    |
+| `nnapi`           | Android Neural Networks API                                                                           |
+| `qnn`             | Qualcomm Neural Networks                                                                              |
+| `xnnpack`         | XNNPACK (cross-platform)                                                                              |
+| `acl`             | ARM Compute Library                                                                                   |
+| `tvm`             | Apache TVM                                                                                            |
+| `rknpu`           | Rockchip NPU                                                                                          |
+| `cann`            | Huawei CANN                                                                                           |
+| `webgpu`          | WebGPU                                                                                                |
+| `azure`           | Azure                                                                                                 |
+| `nvidia`          | Convenience: CUDA + TensorRT                                                                          |
+| `amd`             | Convenience: ROCm + MIGraphX                                                                          |
+| `intel`           | Convenience: OpenVINO + oneDNN                                                                        |
+| `mobile`          | Convenience: NNAPI + CoreML + QNN                                                                     |
+| `all`             | Convenience: annotate + visualize + video + track                                                     |
+
+## 🌐 Browser / WebGPU (WASM)
+
+[![npm version](https://img.shields.io/npm/v/@ultralytics/yolo?logo=npm&logoColor=white&label=npm&color=CB3837)](https://www.npmjs.com/package/@ultralytics/yolo)
+[![npm downloads](https://img.shields.io/npm/dm/@ultralytics/yolo?logo=npm&logoColor=white&label=downloads&color=CB3837)](https://www.npmjs.com/package/@ultralytics/yolo)
+
+The same engine runs in the browser on **WebGPU**, compiled to WebAssembly. The
+shared Rust preprocessing and postprocessing run in wasm, so results match the
+native path, while the forward pass runs on a pluggable backend: the official
+ONNX Runtime Web build (bridged through [`ort-web`](https://ort.pyke.io/backends/web))
+for `.onnx` models, or [**LiteRT.js**](https://developers.google.com/edge/litert/web)
+for `.tflite` models.
+
+It ships as the [`@ultralytics/yolo`](web/README.md) npm package:
+
+```ts
+import { YOLO } from "@ultralytics/yolo";
+
+const model = await YOLO.load("/models/yolo26n.onnx");
+const results = await model.predict("bus.jpg");
+console.log(results.boxes); // [{ x1, y1, x2, y2, conf, cls, name, color }, ...]
+
+// Track objects across webcam or video frames: call once per frame, ids carry over
+const tracked = await model.track(video, { tracker: "tracktrack.yaml" });
+console.log(tracked.boxes.map((box) => box.id)); // [1, 2, 3, ...]
+```
+
+Pass `{ device: "webgpu" | "cpu" }` to pick the accelerator (`"auto"` is the default), and read `model.device` to see
+what actually ran. `model.track()` runs all six trackers (`tracktrack.yaml` by default) on ONNX and LiteRT detection,
+segmentation, pose and OBB models, and `model.resetTracker()` starts a new video; see [Tracking](web/README.md#tracking)
+for a webcam loop and every option.
+
+The backend is picked automatically from the model format (its extension when
+available, otherwise the model bytes), so switching is just a matter of the model
+you load. LiteRT.js (Google's LiteRT for Web) is optional and
+runs **1.2 to 1.5× faster than ONNX Runtime Web on WebGPU** — point `YOLO.load` at an
+Ultralytics `.tflite` export and `npm install @litertjs/core` alongside the package.
+See the [LiteRT.js section](web/README.md#-litertjs-backend) for details.
+
+The browser bindings live in [`crates/web`](crates/web) (the
+`ultralytics-inference-web` cdylib); the JS/TS wrapper and build instructions are
+in [`web/`](web/README.md). A WebGPU-capable browser and a secure context
+(`https`/`localhost`) are required.
+
+## 📦 Dependencies
+
+One of the key benefits of this library is a Rust/ONNX Runtime stack with no PyTorch, TensorFlow, or Python runtime required.
+
+### Core Dependencies (always included)
+
+| Crate               | Purpose                         |
+| ------------------- | ------------------------------- |
+| `ort`               | ONNX Runtime bindings           |
+| `ndarray`           | N-dimensional arrays            |
+| `image`             | Image loading/decoding          |
+| `fast_image_resize` | SIMD-optimized resizing         |
+| `half`              | FP16 support                    |
+| `lru`               | LRU cache for preprocessing LUT |
+| `wide`              | SIMD for fast preprocessing     |
+
+### Optional Dependencies (for the `annotate` feature)
+
+| Crate          | Purpose                                                          |
+| -------------- | ---------------------------------------------------------------- |
+| `imageproc`    | Drawing boxes and shapes                                         |
+| `ab_glyph`     | Text rendering (Arial font, downloaded on first use)             |
+| `harfrust`     | Text shaping (Arabic joining, Hebrew points, ligatures, kerning) |
+| `unicode-bidi` | Right-to-left label order (Unicode bidi algorithm)               |
+
+### Optional Dependencies (for Video & Visualization)
+
+| Crate         | Purpose                            |
+| ------------- | ---------------------------------- |
+| `minifb`      | Window creation and buffer display |
+| `ffmpeg-next` | Video decoding/encoding (ffmpeg)   |
+
+### Video Support (FFmpeg)
+
+Video features require FFmpeg (6, 7, 8 or 9) installed on your system:
+
+```bash
+# macOS
+brew install ffmpeg
+
+# Ubuntu/Debian
+apt-get install -y ffmpeg libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev libclang-dev
+
+# Build with video support
+cargo build --release --features video
+```
+
+Video files and streams decode on every CPU core (FFmpeg `threads=auto`) and webcams use slice threads to keep latency
+low. The frames in flight cost some memory, about 10 to 35 percent more peak RAM on 1080p to 4K video.
+
+On a Jetson with JetPack 7, NVIDIA's `ffmpeg` package (`8.0.1-nvidia1`) replaces the FFmpeg `pkg-config` files but ships
+none for `libswscale`, so the build mixes FFmpeg 8 with Ubuntu's FFmpeg 6.1 `libswscale`, and its extra
+`AV_PIX_FMT_NVBUFSURFACE` pixel format also fails to compile in `ffmpeg-next`. Build FFmpeg into its own prefix and point
+the build at it (add `--enable-gpl --enable-libx264` with `libx264-dev` installed if you save videos with `--save`):
+
+```bash
+./configure --prefix=$HOME/ffmpeg --enable-shared --disable-programs --disable-doc
+make -j$(nproc) && make install
+export PKG_CONFIG_PATH=$HOME/ffmpeg/lib/pkgconfig
+export LD_LIBRARY_PATH=$HOME/ffmpeg/lib:$LD_LIBRARY_PATH
+cargo build --release --features video
+```
+
+To build without annotation and visualization support (smaller binary):
+
+```bash
+cargo build --release --no-default-features
+```
+
+## 🧪 Testing
+
+```bash
+# Run all tests
+cargo test
+
+# Run with output
+cargo test -- --nocapture
+
+# Run specific test
+cargo test test_boxes_xyxy
+```
+
+## 📊 Performance
+
+Benchmarks on Apple M4 MacBook Pro (10-core CPU, ONNX Runtime 1.28, release build, averaged over 100 images):
+
+### YOLO26n Detection Model (640x640)
+
+| Device                       | Precision | Model Size | Preprocess | Inference | Postprocess | Total   |
+| ---------------------------- | --------- | ---------- | ---------- | --------- | ----------- | ------- |
+| CPU                          | FP32      | 9.9 MB     | ~0.3ms     | ~17.7ms   | ~0.3ms      | ~18.3ms |
+| CPU                          | FP16      | 5.0 MB     | ~0.3ms     | ~19.3ms   | ~0.3ms      | ~19.9ms |
+| CoreML (`--features coreml`) | FP32      | 9.9 MB     | ~0.3ms     | ~4.7ms    | ~0.3ms      | ~5.3ms  |
+| CoreML (`--features coreml`) | FP16      | 5.0 MB     | ~0.3ms     | ~1.5ms    | ~0.3ms      | ~2.1ms  |
+
+**Key findings:**
+
+- **FP16 models are ~50% smaller** (5.0 MB vs 9.9 MB)
+- **FP32 is slightly faster on CPU** (~17.7ms vs ~19.3ms): the CPU execution provider widens FP16 weights to FP32, so FP16 saves disk space but not compute
+- **CoreML inference is ~4x faster than CPU at FP32 and ~13x at FP16** (~3.5x and ~9.5x end to end); an FP16 export on CoreML is the fastest option on Apple Silicon
+- Use **FP32 for CPU** inference, **FP16 for CoreML and GPU** (where it provides speedup)
+
+### Threading Optimization
+
+Intra-op threading defaults to `num_threads: 0`, which the crate resolves to `available_parallelism()` when it builds the session. YOLO26n FP32 inference by thread count:
+
+| Threads        | 1       | 2       | 4       | 6       | 8       | 0 (auto, 10 cores) |
+| -------------- | ------- | ------- | ------- | ------- | ------- | ------------------ |
+| Inference (M4) | ~20.8ms | ~16.7ms | ~15.3ms | ~16.6ms | ~17.2ms | ~17.7ms            |
+
+On Apple M4 the fastest setting is 4 threads, one per performance core; adding the slower efficiency cores makes it slower again for a model this small. Set it with `InferenceConfig::new().with_threads(4)`.
+
+## 🔮 Roadmap
+
+### Completed
+
+- [x] Detection, Segmentation, Semantic Segmentation, Depth Estimation, Classification, Pose, and OBB inference
+- [x] ONNX model metadata parsing (auto-detect classes, task, imgsz)
+- [x] Hardware acceleration support (CUDA, TensorRT, CoreML, OpenVINO, XNNPACK)
+- [x] Ultralytics-compatible Results API (`Boxes`, `Masks`, `Keypoints`, `Probs`, `Obb`, `SemanticMask`, `DepthMap`)
+- [x] Multiple input sources (images, directories, globs, URLs)
+- [x] Video file support and webcam/RTSP streaming
+- [x] Image annotation and visualization
+- [x] FP16 inference
+- [x] Batch inference support
+- [x] Rectangular inference support and optimization
+- [x] Class filtering support
+- [x] Auto-download all YOLO26, YOLO11, and YOLOv8 ONNX models (all sizes n/s/m/l/x, all tasks)
+- [x] Scene text OCR with YOLO26-Text and PaddleOCR (`--ocr`)
+- [x] Object tracking with all Ultralytics trackers (`track`), natively and in the browser
+- [x] `--task` CLI flag: selects and auto-downloads the matching nano model when `--model` is omitted; errors on task/model metadata conflict
+- [x] WebAssembly (WASM) browser inference on WebGPU (npm [`@ultralytics/yolo`](https://www.npmjs.com/package/@ultralytics/yolo))
+
+### In Progress
+
+- [ ] Python bindings (PyO3)
+
+## 💡 Contribute
+
+Ultralytics thrives on community collaboration, and we deeply value your contributions! Whether it's reporting bugs,
+suggesting features, or submitting code changes, your involvement is crucial.
+
+- **Report Issues**: Found a bug? [Open an issue](https://github.com/ultralytics/inference/issues)
+- **Feature Requests**: Have an idea? [Share it](https://github.com/ultralytics/inference/issues)
+- **Pull Requests**: Read our [Contributing Guide](https://docs.ultralytics.com/help/contributing) first
+- **Feedback**: Take our [Survey](https://www.ultralytics.com/survey?utm_source=github&utm_medium=social&utm_campaign=Survey)
+
+A heartfelt thank you 🙏 goes out to all our contributors! Your efforts help make Ultralytics tools better for everyone.
+
+[![Ultralytics open-source contributors](https://raw.githubusercontent.com/ultralytics/assets/main/im/image-contributors.png)](https://github.com/ultralytics/ultralytics/graphs/contributors)
+
+## 📄 License
+
+Ultralytics offers two licensing options to suit different needs:
+
+- **AGPL-3.0 License**: This [OSI-approved](https://opensource.org/license/agpl-3.0) open-source license is perfect for students, researchers, and enthusiasts. It encourages open collaboration and knowledge sharing. See the [LICENSE](https://github.com/ultralytics/inference/blob/main/LICENSE) file for full details.
+- **Ultralytics Enterprise License**: Designed for commercial use, this license allows for the seamless integration of Ultralytics software and AI models into commercial products and services, bypassing the open-source requirements of AGPL-3.0. If your use case involves commercial deployment, please contact us via [Ultralytics Licensing](https://www.ultralytics.com/license).
+
+## 📮 Contact
+
+- **GitHub Issues**: [Bug reports and feature requests](https://github.com/ultralytics/inference/issues)
+- **Discord**: [Join our community](https://discord.com/invite/ultralytics)
+- **Documentation**: [docs.ultralytics.com](https://docs.ultralytics.com)
+
+<br>
+<div align="center">
+  <a href="https://github.com/ultralytics"><img src="https://github.com/ultralytics/assets/raw/main/social/logo-social-github.png" width="3%" alt="Ultralytics GitHub"></a>
+  <img src="https://github.com/ultralytics/assets/raw/main/social/logo-transparent.png" width="3%" alt="space">
+  <a href="https://www.linkedin.com/company/ultralytics/"><img src="https://github.com/ultralytics/assets/raw/main/social/logo-social-linkedin.png" width="3%" alt="Ultralytics LinkedIn"></a>
+  <img src="https://github.com/ultralytics/assets/raw/main/social/logo-transparent.png" width="3%" alt="space">
+  <a href="https://x.com/ultralytics"><img src="https://github.com/ultralytics/assets/raw/main/social/logo-social-twitter.png" width="3%" alt="Ultralytics Twitter"></a>
+  <img src="https://github.com/ultralytics/assets/raw/main/social/logo-transparent.png" width="3%" alt="space">
+  <a href="https://www.youtube.com/ultralytics?sub_confirmation=1"><img src="https://github.com/ultralytics/assets/raw/main/social/logo-social-youtube.png" width="3%" alt="Ultralytics YouTube"></a>
+  <img src="https://github.com/ultralytics/assets/raw/main/social/logo-transparent.png" width="3%" alt="space">
+  <a href="https://www.tiktok.com/@ultralytics"><img src="https://github.com/ultralytics/assets/raw/main/social/logo-social-tiktok.png" width="3%" alt="Ultralytics TikTok"></a>
+  <img src="https://github.com/ultralytics/assets/raw/main/social/logo-transparent.png" width="3%" alt="space">
+  <a href="https://ultralytics.com/bilibili"><img src="https://github.com/ultralytics/assets/raw/main/social/logo-social-bilibili.png" width="3%" alt="Ultralytics BiliBili"></a>
+  <img src="https://github.com/ultralytics/assets/raw/main/social/logo-transparent.png" width="3%" alt="space">
+  <a href="https://discord.com/invite/ultralytics"><img src="https://github.com/ultralytics/assets/raw/main/social/logo-social-discord.png" width="3%" alt="Ultralytics Discord"></a>
+</div>
