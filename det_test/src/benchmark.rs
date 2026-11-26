@@ -150,9 +150,9 @@ const OBJ_CONF_THRESHOLD: f32 = 0.3;
 const OCR_CONF_THRESHOLD: f32 = 0.3;
 
 pub fn run_benchmark() -> Result<()> {
-    let image_dir = PathBuf::from("D:/test_det");
-    let db_path = PathBuf::from("data/gallery.db");
-    let json_path = PathBuf::from("data/gallery.json");
+    let image_dir = PathBuf::from("data/test/samples");
+    let db_path = PathBuf::from("data/test/dummy.db");
+    let json_path = PathBuf::from("data/test/dataview.json");
 
     let mut obj_detector = ObjDetector::new(
         Path::new("models/obj_det/yolo11n-320-fp16.onnx"),

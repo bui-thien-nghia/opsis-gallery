@@ -1,5 +1,4 @@
 .venv
-images
 target
 .cargo-ok
 .cargo_vcs_info.json
@@ -20,6 +19,7 @@ target
 *.png
 *.jpg
 *.json
-!det_test/models/obj_det/yolo11n-320-int8.onnx
-!det_test/models/ocr/ppocrv5-det-mobile.onnx
-!det_test/models/ocr/ppocrv5-rec-mobile.onnx
+*.db
+data
+models/obj_det
+models/ocr
