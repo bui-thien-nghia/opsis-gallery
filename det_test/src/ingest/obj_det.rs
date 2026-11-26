@@ -1,17 +1,24 @@
-use crate::preprocess::rescale_xyxy;
-use crate::types::YoloDetection;
+use crate::ingest::preprocess::rescale_xyxy;
 use anyhow::{Context, Result};
 use image::DynamicImage;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use ultralytics_inference::{InferenceConfig, YOLOModel};
 
-pub struct YoloPreparedInput<'a> {
+pub struct ObjPreparedInput<'a> {
     pub img: &'a DynamicImage,
     pub resize_scale: f32,
 }
 
 pub struct ObjDetector {
     model: YOLOModel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObjDetection {
+    pub class: String,
+    pub confidence: f32,
+    pub bbox: [f32; 4],
 }
 
 impl ObjDetector {
@@ -27,11 +34,11 @@ impl ObjDetector {
         Ok(Self { model })
     }
 
-    pub fn prepare<'a>(&self, img: &'a DynamicImage, resize_scale: f32) -> YoloPreparedInput<'a> {
-        YoloPreparedInput { img, resize_scale }
+    pub fn prepare<'a>(&self, img: &'a DynamicImage, resize_scale: f32) -> ObjPreparedInput<'a> {
+        ObjPreparedInput { img, resize_scale }
     }
 
-    pub fn detect(&mut self, prepared: YoloPreparedInput<'_>) -> Result<Vec<YoloDetection>> {
+    pub fn detect(&mut self, prepared: ObjPreparedInput<'_>) -> Result<Vec<ObjDetection>> {
         let results = self
             .model
             .predict_image(prepared.img, String::new())
@@ -57,7 +64,7 @@ impl ObjDetector {
                     [xyxy[[i, 0]], xyxy[[i, 1]], xyxy[[i, 2]], xyxy[[i, 3]]],
                     prepared.resize_scale,
                 );
-                detections.push(YoloDetection {
+                detections.push(ObjDetection {
                     class,
                     confidence: confs[i],
                     bbox,

@@ -1,13 +1,20 @@
-use crate::preprocess::rescale_quad;
-use crate::types::OcrDetection;
+use crate::ingest::preprocess::rescale_quad;
 use anyhow::{Context, Result};
 use image::DynamicImage;
 use oar_ocr::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub struct OcrPipeline {
     engine: OAROCR,
     conf_threshold: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OcrDetection {
+    pub text: String,
+    pub confidence: f32,
+    pub bbox: [[i32; 2]; 4],
 }
 
 impl OcrPipeline {

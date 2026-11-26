@@ -1,6 +1,6 @@
 // Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
-#![allow(clippy::multiple_crate_versions)]
+#![allow(clippy::multiple_crate_versions, warnings)]
 #![deny(dead_code)]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg_attr(docsrs, feature(doc_cfg))]

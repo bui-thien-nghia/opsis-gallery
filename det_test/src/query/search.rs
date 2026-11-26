@@ -1,4 +1,4 @@
-use crate::types::ImageRecord;
+use crate::ingest::ImageRecord;
 use nucleo_matcher::{
     Config, Matcher, Utf32Str,
     pattern::{CaseMatching, Normalization, Pattern},
@@ -57,8 +57,6 @@ impl FuzzySearcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::StageRuntimes;
-
     fn record_with_text(name: &str, combined_text: &str) -> ImageRecord {
         ImageRecord {
             file_name: name.to_string(),
@@ -66,15 +64,8 @@ mod tests {
             object_classes: String::new(),
             text_detections: String::new(),
             combined_text: combined_text.to_string(),
-            yolo_detections: Vec::new(),
+            obj_detections: Vec::new(),
             ocr_detections: Vec::new(),
-            runtime: StageRuntimes {
-                preprocessing: 0.0,
-                yolo_inference: 0.0,
-                ocr_inference: 0.0,
-                postprocessing: 0.0,
-                total: 0.0,
-            },
         }
     }
 

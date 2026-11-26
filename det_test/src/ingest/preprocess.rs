@@ -1,6 +1,42 @@
 use anyhow::{Context, Result, bail};
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+pub fn collect_image_paths(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(dir)
+        .with_context(|| format!("Failed to read image directory: {}", dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() {
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_ascii_lowercase());
+            if matches!(
+                ext.as_deref(),
+                Some(
+                    "jpg"
+                        | "jpeg"
+                        | "png"
+                        | "webp"
+                        | "bmp"
+                        | "tif"
+                        | "tiff"
+                        | "gif"
+                        | "HEIC"
+                        | "xmp"
+                )
+            ) {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
 
 pub fn load_image(path: &Path) -> Result<DynamicImage> {
     if !path.exists() {

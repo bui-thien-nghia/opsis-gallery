@@ -1,8 +1,17 @@
-use crate::types::ImageRecord;
-use serde::Serialize;
+use crate::ingest::ImageRecord;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Instant;
 use sysinfo::{Pid, ProcessesToUpdate, System};
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StageRuntimes {
+    pub preprocessing: f64,
+    pub obj_inference: f64,
+    pub ocr_inference: f64,
+    pub postprocessing: f64,
+    pub total: f64,
+}
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct FieldStorageBytes {
@@ -11,9 +20,8 @@ pub struct FieldStorageBytes {
     pub object_classes: usize,
     pub text_detections: usize,
     pub combined_text: usize,
-    pub yolo_detections: usize,
+    pub obj_detections: usize,
     pub ocr_detections: usize,
-    pub runtime: usize,
     pub total: usize,
 }
 
@@ -89,17 +97,15 @@ pub fn measure_record_storage(record: &ImageRecord) -> FieldStorageBytes {
     let object_classes = bytes_of(&record.object_classes);
     let text_detections = bytes_of(&record.text_detections);
     let combined_text = bytes_of(&record.combined_text);
-    let yolo_detections = bytes_of(&record.yolo_detections);
+    let obj_detections = bytes_of(&record.obj_detections);
     let ocr_detections = bytes_of(&record.ocr_detections);
-    let runtime = bytes_of(&record.runtime);
     let total = file_name
         + file_path
         + object_classes
         + text_detections
         + combined_text
-        + yolo_detections
-        + ocr_detections
-        + runtime;
+        + obj_detections
+        + ocr_detections;
 
     FieldStorageBytes {
         file_name,
@@ -107,9 +113,8 @@ pub fn measure_record_storage(record: &ImageRecord) -> FieldStorageBytes {
         object_classes,
         text_detections,
         combined_text,
-        yolo_detections,
+        obj_detections,
         ocr_detections,
-        runtime,
         total,
     }
 }
@@ -214,17 +219,13 @@ pub fn summarize_profiles(profiles: &[ImageProfile]) -> HashMap<String, SummaryS
             .or_default()
             .push(p.storage_bytes.combined_text as f64);
         metrics
-            .entry("storage_yolo_detections")
+            .entry("storage_obj_detections")
             .or_default()
-            .push(p.storage_bytes.yolo_detections as f64);
+            .push(p.storage_bytes.obj_detections as f64);
         metrics
             .entry("storage_ocr_detections")
             .or_default()
             .push(p.storage_bytes.ocr_detections as f64);
-        metrics
-            .entry("storage_runtime")
-            .or_default()
-            .push(p.storage_bytes.runtime as f64);
     }
 
     metrics
