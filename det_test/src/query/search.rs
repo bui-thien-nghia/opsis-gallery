@@ -61,6 +61,7 @@ mod tests {
         ImageRecord {
             file_name: name.to_string(),
             file_path: name.to_string(),
+            date: String::new(),
             object_classes: String::new(),
             text_detections: String::new(),
             combined_text: combined_text.to_string(),
@@ -88,5 +89,14 @@ mod tests {
         let hits = searcher.search(&records, "boat", 1);
         assert_eq!(hits.len(), 1);
         assert!(hits[0].record.combined_text.contains("boat"));
+    }
+
+    #[test]
+    fn search_matches_date_in_combined_text() {
+        let records = vec![record_with_text("dated.jpg", "person October 20th, 2026")];
+        let mut searcher = FuzzySearcher::new();
+        let hits = searcher.search(&records, "October 20th 2026", 5);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].record.file_name, "dated.jpg");
     }
 }

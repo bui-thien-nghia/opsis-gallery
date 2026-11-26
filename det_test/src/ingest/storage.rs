@@ -38,6 +38,7 @@ impl SqliteStore {
                 "CREATE TABLE detections (
                 file_name TEXT PRIMARY KEY,
                 file_path TEXT NOT NULL,
+                date TEXT NOT NULL DEFAULT '',
                 object_classes TEXT NOT NULL,
                 text_detections TEXT NOT NULL,
                 combined_text TEXT NOT NULL,
@@ -61,6 +62,7 @@ impl SqliteStore {
                     CREATE TABLE detections (
                         file_name TEXT PRIMARY KEY,
                         file_path TEXT NOT NULL,
+                        date TEXT NOT NULL DEFAULT '',
                         object_classes TEXT NOT NULL,
                         text_detections TEXT NOT NULL,
                         combined_text TEXT NOT NULL,
@@ -77,8 +79,16 @@ impl SqliteStore {
                     DROP TABLE detections_legacy;",
                 )?;
                 tx.commit()?;
-            } else if !columns.iter().any(|column| column == "obj_detections_json") {
-                anyhow::bail!("detections table is missing its object-detection JSON column");
+            } else {
+                if !columns.iter().any(|column| column == "date") {
+                    conn.execute(
+                        "ALTER TABLE detections ADD COLUMN date TEXT NOT NULL DEFAULT ''",
+                        [],
+                    )?;
+                }
+                if !columns.iter().any(|column| column == "obj_detections_json") {
+                    anyhow::bail!("detections table is missing its object-detection JSON column");
+                }
             }
         }
         Ok(Self { conn })
@@ -89,9 +99,9 @@ impl SqliteStore {
         {
             let mut stmt = tx.prepare(
                 "INSERT OR REPLACE INTO detections (
-                    file_name, file_path, object_classes, text_detections, combined_text,
+                    file_name, file_path, date, object_classes, text_detections, combined_text,
                     obj_detections_json, ocr_detections_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
 
             for r in records {
@@ -100,6 +110,7 @@ impl SqliteStore {
                 stmt.execute(params![
                     r.file_name,
                     r.file_path,
+                    r.date,
                     r.object_classes,
                     r.text_detections,
                     r.combined_text,
@@ -115,20 +126,21 @@ impl SqliteStore {
     pub fn load_all_records(&self) -> Result<Vec<ImageRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT
-                file_name, file_path, object_classes, text_detections, combined_text,
+                file_name, file_path, date, object_classes, text_detections, combined_text,
                 obj_detections_json, ocr_detections_json
             FROM detections",
         )?;
 
         let rows = stmt.query_map([], |row| {
-            let obj_json: String = row.get(5)?;
-            let ocr_json: String = row.get(6)?;
+            let obj_json: String = row.get(6)?;
+            let ocr_json: String = row.get(7)?;
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
                 obj_json,
                 ocr_json,
             ))
@@ -139,6 +151,7 @@ impl SqliteStore {
             let (
                 file_name,
                 file_path,
+                date,
                 object_classes,
                 text_detections,
                 combined_text,
@@ -149,6 +162,7 @@ impl SqliteStore {
             records.push(ImageRecord {
                 file_name,
                 file_path,
+                date,
                 object_classes,
                 text_detections,
                 combined_text,
@@ -169,9 +183,10 @@ mod tests {
         ImageRecord {
             file_name: "sample.jpg".to_string(),
             file_path: "images/sample.jpg".to_string(),
+            date: "October 20th, 2026".to_string(),
             object_classes: "person, boat".to_string(),
             text_detections: "HARBOR".to_string(),
-            combined_text: "person, boat HARBOR".to_string(),
+            combined_text: "person, boat HARBOR October 20th, 2026".to_string(),
             obj_detections: vec![ObjDetection {
                 class: "person".to_string(),
                 confidence: 0.92,
@@ -200,6 +215,7 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].file_name, record.file_name);
         assert_eq!(loaded[0].combined_text, record.combined_text);
+        assert_eq!(loaded[0].date, record.date);
         assert_eq!(loaded[0].obj_detections.len(), 1);
         assert_eq!(loaded[0].ocr_detections.len(), 1);
         assert_eq!(loaded[0].ocr_detections[0].text, "HARBOR");
@@ -243,6 +259,7 @@ mod tests {
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].file_name, "legacy.jpg");
+        assert_eq!(records[0].date, "");
         assert_eq!(records[0].obj_detections.len(), 1);
     }
 

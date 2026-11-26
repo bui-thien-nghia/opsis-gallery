@@ -17,6 +17,7 @@ pub struct StageRuntimes {
 pub struct FieldStorageBytes {
     pub file_name: usize,
     pub file_path: usize,
+    pub date: usize,
     pub object_classes: usize,
     pub text_detections: usize,
     pub combined_text: usize,
@@ -28,9 +29,11 @@ pub struct FieldStorageBytes {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ImageProfile {
     pub file_name: String,
+    pub date: String,
     pub runtime_total_s: f64,
     pub runtime_preprocessing_s: f64,
-    pub runtime_inference_s: f64,
+    pub runtime_obj_inference_s: f64,
+    pub runtime_ocr_inference_s: f64,
     pub runtime_postprocessing_s: f64,
     pub memory_bytes: u64,
     pub cpu_percent: f32,
@@ -94,6 +97,7 @@ pub fn measure_record_storage(record: &ImageRecord) -> FieldStorageBytes {
     let bytes_of = |v: &dyn ErasedSerdeLen| v.json_len();
     let file_name = bytes_of(&record.file_name);
     let file_path = bytes_of(&record.file_path);
+    let date = bytes_of(&record.date);
     let object_classes = bytes_of(&record.object_classes);
     let text_detections = bytes_of(&record.text_detections);
     let combined_text = bytes_of(&record.combined_text);
@@ -101,6 +105,7 @@ pub fn measure_record_storage(record: &ImageRecord) -> FieldStorageBytes {
     let ocr_detections = bytes_of(&record.ocr_detections);
     let total = file_name
         + file_path
+        + date
         + object_classes
         + text_detections
         + combined_text
@@ -110,6 +115,7 @@ pub fn measure_record_storage(record: &ImageRecord) -> FieldStorageBytes {
     FieldStorageBytes {
         file_name,
         file_path,
+        date,
         object_classes,
         text_detections,
         combined_text,
@@ -179,9 +185,13 @@ pub fn summarize_profiles(profiles: &[ImageProfile]) -> HashMap<String, SummaryS
             .or_default()
             .push(p.runtime_preprocessing_s);
         metrics
-            .entry("runtime_inference_s")
+            .entry("runtime_obj_inference_s")
             .or_default()
-            .push(p.runtime_inference_s);
+            .push(p.runtime_obj_inference_s);
+        metrics
+            .entry("runtime_ocr_inference_s")
+            .or_default()
+            .push(p.runtime_ocr_inference_s);
         metrics
             .entry("runtime_postprocessing_s")
             .or_default()
@@ -206,6 +216,10 @@ pub fn summarize_profiles(profiles: &[ImageProfile]) -> HashMap<String, SummaryS
             .entry("storage_file_path")
             .or_default()
             .push(p.storage_bytes.file_path as f64);
+        metrics
+            .entry("storage_date")
+            .or_default()
+            .push(p.storage_bytes.date as f64);
         metrics
             .entry("storage_object_classes")
             .or_default()

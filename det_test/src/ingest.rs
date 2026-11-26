@@ -7,7 +7,7 @@ use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use obj_det::ObjDetector;
 use ocr::OcrPipeline;
-use preprocess::{adaptive_resize, collect_image_paths, load_image};
+use preprocess::{adaptive_resize, collect_image_paths, formatted_image_date, load_image};
 use serde::{Deserialize, Serialize};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
@@ -17,6 +17,8 @@ use storage::SqliteStore;
 pub struct ImageRecord {
     pub file_name: String,
     pub file_path: String,
+    #[serde(default)]
+    pub date: String,
     pub object_classes: String,
     pub text_detections: String,
     pub combined_text: String,
@@ -60,6 +62,7 @@ pub fn run_ingest(cfg: &IngestConfig<'_>) -> Result<usize> {
             .unwrap_or("unknown")
             .to_string();
         let file_path = path.to_string_lossy().into_owned();
+        let date = formatted_image_date(path);
 
         let mut obj_detections = Vec::new();
         let mut ocr_detections = Vec::new();
@@ -109,17 +112,20 @@ pub fn run_ingest(cfg: &IngestConfig<'_>) -> Result<usize> {
             .collect::<Vec<_>>()
             .join(" ");
 
-        let combined_text = if object_classes.is_empty() {
-            text_detections.clone()
-        } else if text_detections.is_empty() {
-            object_classes.clone()
-        } else {
-            format!("{object_classes} {text_detections}")
-        };
+        let combined_text = [
+            object_classes.as_str(),
+            text_detections.as_str(),
+            date.as_str(),
+        ]
+        .into_iter()
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
 
         records.push(ImageRecord {
             file_name: file_name.clone(),
             file_path,
+            date,
             object_classes,
             text_detections,
             combined_text,

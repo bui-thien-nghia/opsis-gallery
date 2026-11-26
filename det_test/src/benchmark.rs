@@ -4,7 +4,7 @@ use crate::ingest::{
     ImageRecord,
     obj_det::ObjDetector,
     ocr::OcrPipeline,
-    preprocess::{adaptive_resize, collect_image_paths, load_image},
+    preprocess::{adaptive_resize, collect_image_paths, formatted_image_date, load_image},
     storage::{SqliteStore, save_records_json},
 };
 use crate::query::search::FuzzySearcher;
@@ -14,8 +14,136 @@ use profiler::{
     ImageProfile, StageRuntimes, StageTimer, SystemSampler, measure_record_storage,
     summarize_profiles,
 };
+use serde::Serialize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+
+#[derive(Serialize)]
+struct BenchmarkCsvRow<'a> {
+    row_type: &'a str,
+    subject: &'a str,
+    date: Option<&'a str>,
+    runtime_total_s: Option<f64>,
+    runtime_preprocessing_s: Option<f64>,
+    runtime_obj_inference_s: Option<f64>,
+    runtime_ocr_inference_s: Option<f64>,
+    runtime_postprocessing_s: Option<f64>,
+    memory_bytes: Option<u64>,
+    cpu_percent: Option<f32>,
+    storage_file_name_bytes: Option<usize>,
+    storage_file_path_bytes: Option<usize>,
+    storage_date_bytes: Option<usize>,
+    storage_object_classes_bytes: Option<usize>,
+    storage_text_detections_bytes: Option<usize>,
+    storage_combined_text_bytes: Option<usize>,
+    storage_obj_detections_bytes: Option<usize>,
+    storage_ocr_detections_bytes: Option<usize>,
+    storage_total_bytes: Option<usize>,
+    hits: Option<usize>,
+    metric: Option<&'a str>,
+    min: Option<f64>,
+    max: Option<f64>,
+    median: Option<f64>,
+    mean: Option<f64>,
+    std_dev: Option<f64>,
+}
+
+impl<'a> BenchmarkCsvRow<'a> {
+    fn empty(row_type: &'a str, subject: &'a str) -> Self {
+        Self {
+            row_type,
+            subject,
+            date: None,
+            runtime_total_s: None,
+            runtime_preprocessing_s: None,
+            runtime_obj_inference_s: None,
+            runtime_ocr_inference_s: None,
+            runtime_postprocessing_s: None,
+            memory_bytes: None,
+            cpu_percent: None,
+            storage_file_name_bytes: None,
+            storage_file_path_bytes: None,
+            storage_date_bytes: None,
+            storage_object_classes_bytes: None,
+            storage_text_detections_bytes: None,
+            storage_combined_text_bytes: None,
+            storage_obj_detections_bytes: None,
+            storage_ocr_detections_bytes: None,
+            storage_total_bytes: None,
+            hits: None,
+            metric: None,
+            min: None,
+            max: None,
+            median: None,
+            mean: None,
+            std_dev: None,
+        }
+    }
+}
+
+fn export_benchmark_csv(
+    path: &Path,
+    profiles: &[ImageProfile],
+    summary: &std::collections::HashMap<String, profiler::SummaryStats>,
+    insert_runtime_s: f64,
+    insert_memory_bytes: u64,
+    insert_cpu_percent: f32,
+    search_runtime_s: f64,
+    search_memory_bytes: u64,
+    search_cpu_percent: f32,
+    search_hits: usize,
+) -> Result<()> {
+    let mut writer = csv::Writer::from_path(path)?;
+
+    for profile in profiles {
+        let mut row = BenchmarkCsvRow::empty("image", &profile.file_name);
+        row.runtime_total_s = Some(profile.runtime_total_s);
+        row.runtime_preprocessing_s = Some(profile.runtime_preprocessing_s);
+        row.runtime_obj_inference_s = Some(profile.runtime_obj_inference_s);
+        row.runtime_ocr_inference_s = Some(profile.runtime_ocr_inference_s);
+        row.runtime_postprocessing_s = Some(profile.runtime_postprocessing_s);
+        row.memory_bytes = Some(profile.memory_bytes);
+        row.cpu_percent = Some(profile.cpu_percent);
+        row.storage_file_name_bytes = Some(profile.storage_bytes.file_name);
+        row.storage_file_path_bytes = Some(profile.storage_bytes.file_path);
+        row.date = Some(&profile.date);
+        row.storage_date_bytes = Some(profile.storage_bytes.date);
+        row.storage_object_classes_bytes = Some(profile.storage_bytes.object_classes);
+        row.storage_text_detections_bytes = Some(profile.storage_bytes.text_detections);
+        row.storage_combined_text_bytes = Some(profile.storage_bytes.combined_text);
+        row.storage_obj_detections_bytes = Some(profile.storage_bytes.obj_detections);
+        row.storage_ocr_detections_bytes = Some(profile.storage_bytes.ocr_detections);
+        row.storage_total_bytes = Some(profile.storage_bytes.total);
+        writer.serialize(row)?;
+    }
+
+    for (metric, stats) in summary {
+        let mut row = BenchmarkCsvRow::empty("summary", metric);
+        row.metric = Some(metric);
+        row.min = Some(stats.min);
+        row.max = Some(stats.max);
+        row.median = Some(stats.median);
+        row.mean = Some(stats.mean);
+        row.std_dev = Some(stats.std_dev);
+        writer.serialize(row)?;
+    }
+
+    let mut insert_row = BenchmarkCsvRow::empty("operation", "database_insertion");
+    insert_row.runtime_total_s = Some(insert_runtime_s);
+    insert_row.memory_bytes = Some(insert_memory_bytes);
+    insert_row.cpu_percent = Some(insert_cpu_percent);
+    writer.serialize(insert_row)?;
+
+    let mut search_row = BenchmarkCsvRow::empty("operation", "search_query");
+    search_row.runtime_total_s = Some(search_runtime_s);
+    search_row.memory_bytes = Some(search_memory_bytes);
+    search_row.cpu_percent = Some(search_cpu_percent);
+    search_row.hits = Some(search_hits);
+    writer.serialize(search_row)?;
+
+    writer.flush()?;
+    Ok(())
+}
 
 const MAX_DIM: u32 = 1600;
 const OBJ_CONF_THRESHOLD: f32 = 0.3;
@@ -56,6 +184,7 @@ pub fn run_benchmark() -> Result<()> {
             .unwrap_or("unknown")
             .to_string();
         let file_path = path.to_string_lossy().into_owned();
+        let date = formatted_image_date(path);
 
         let mut prep_s = 0.0;
         let mut obj_detections = Vec::new();
@@ -121,13 +250,15 @@ pub fn run_benchmark() -> Result<()> {
             .collect::<Vec<_>>()
             .join(" ");
 
-        let combined_text = if object_classes.is_empty() {
-            text_detections.clone()
-        } else if text_detections.is_empty() {
-            object_classes.clone()
-        } else {
-            format!("{object_classes} {text_detections}")
-        };
+        let combined_text = [
+            object_classes.as_str(),
+            text_detections.as_str(),
+            date.as_str(),
+        ]
+        .into_iter()
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
         let post_s = post_timer.elapsed_secs();
 
         let runtime = StageRuntimes {
@@ -141,6 +272,7 @@ pub fn run_benchmark() -> Result<()> {
         let record = ImageRecord {
             file_name: file_name.clone(),
             file_path,
+            date: date.clone(),
             object_classes,
             text_detections,
             combined_text,
@@ -153,9 +285,11 @@ pub fn run_benchmark() -> Result<()> {
 
         profiles.push(ImageProfile {
             file_name: file_name.clone(),
+            date: date.clone(),
             runtime_total_s: runtime.total,
             runtime_preprocessing_s: runtime.preprocessing,
-            runtime_inference_s: runtime.obj_inference + runtime.ocr_inference,
+            runtime_obj_inference_s: runtime.obj_inference,
+            runtime_ocr_inference_s: runtime.ocr_inference,
             runtime_postprocessing_s: runtime.postprocessing,
             memory_bytes: mem,
             cpu_percent: cpu,
@@ -186,6 +320,23 @@ pub fn run_benchmark() -> Result<()> {
     let (query_mem, query_cpu) = sampler.sample();
 
     let summary = summarize_profiles(&profiles);
+    let csv_path = PathBuf::from("data/benchmark_profiles.csv");
+    export_benchmark_csv(
+        &csv_path,
+        &profiles,
+        &summary,
+        insert_elapsed_s,
+        insert_mem,
+        insert_cpu,
+        query_elapsed_s,
+        query_mem,
+        query_cpu,
+        hits.len(),
+    )?;
+    println!(
+        "Benchmark measurements exported to '{}'.",
+        csv_path.display()
+    );
 
     println!("\n=== Per-Image Processing Stats ===");
     for (metric, stats) in &summary {
