@@ -25,16 +25,16 @@ fn current_rss_mb() -> u64 {
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Memory usage benchmarking for SigLIP2 and CLIP-like models")]
 struct Args {
-    #[arg(long, default_value = "assets/enc/vision.onnx")]
+    #[arg(long, default_value = "models/vision.onnx")]
     vision_model: PathBuf,
 
-    #[arg(long, default_value = "assets/enc/text.onnx")]
+    #[arg(long, default_value = "models/text.onnx")]
     text_model: PathBuf,
 
-    #[arg(long, default_value = "assets/enc/tokenizer.json")]
+    #[arg(long, default_value = "models/tokenizer.json")]
     tokenizer: PathBuf,
 
-    #[arg(long, default_value = "assets/images")]
+    #[arg(long)]
     image_dir: PathBuf,
 
     #[arg(long, default_value = "A grill party on a bench at sunset.")]
